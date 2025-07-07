@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS trading_pairs (
 );
 
 -- Create swap events table
+-- UNIQUE 唯一约束，防止重复
 CREATE TABLE IF NOT EXISTS swap_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     pair_address VARCHAR(42) NOT NULL,

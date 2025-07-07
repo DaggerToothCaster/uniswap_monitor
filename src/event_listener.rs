@@ -3,8 +3,8 @@ use crate::models::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ethers::{
-    contract::{abigen, Contract},
-    providers::{Provider, Http},
+    contract::{abigen, Contract, EthLogDecode},
+    providers::{Provider, Http, Middleware},
     types::{Address, Filter, Log, U256, BlockNumber},
 };
 use std::sync::Arc;
@@ -145,7 +145,11 @@ impl EventListener {
     }
 
     async fn handle_pair_created_event(&self, log: Log) -> Result<()> {
-        let event = Contract::decode_event::<PairCreatedFilter>("PairCreated", log.topics, log.data)?;
+        let raw_log = ethers::contract::RawLog {
+            topics: log.topics.clone(),
+            data: log.data.0.clone(),
+        };
+        let event = PairCreatedFilter::decode_log(&raw_log)?;
         
         let block = self.provider.get_block(log.block_number.unwrap()).await?;
         let timestamp = DateTime::from_timestamp(block.unwrap().timestamp.as_u64() as i64, 0)

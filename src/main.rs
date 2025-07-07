@@ -11,7 +11,10 @@ use crate::{
     event_listener::EventListener,
 };
 use anyhow::Result;
-use ethers::{providers::{Provider, Http}, types::Address};
+use ethers::{
+    providers::{Http, Provider},
+    types::Address,
+};
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -21,9 +24,7 @@ use tracing_subscriber;
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     // Load configuration
     let config = Config::from_env()?;
@@ -40,20 +41,29 @@ async fn main() -> Result<()> {
 
     // Start event listeners for each enabled chain
     for (chain_id, chain_config) in &config.chains {
+        let chain_id = *chain_id;
+        let chain_config = chain_config.clone();
+
         if !chain_config.enabled {
-            info!("Chain {} ({}) is disabled, skipping", chain_id, chain_config.name);
+            info!(
+                "Chain {} ({}) is disabled, skipping",
+                chain_id, chain_config.name
+            );
             continue;
         }
 
-        info!("Starting monitoring for chain {} ({})", chain_id, chain_config.name);
+        info!(
+            "Starting monitoring for chain {} ({})",
+            chain_id, chain_config.name
+        );
 
         let provider = Arc::new(Provider::<Http>::try_from(&chain_config.rpc_url)?);
         let factory_address: Address = chain_config.factory_address.parse()?;
-        
+
         let mut event_listener = EventListener::new(
             provider,
             Arc::clone(&database),
-            *chain_id,
+            chain_id,
             factory_address,
             event_sender.clone(),
             chain_config.poll_interval,
@@ -74,9 +84,14 @@ async fn main() -> Result<()> {
     };
 
     let app = create_router(api_state);
-    let listener = tokio::net::TcpListener::bind(format!("{}:{}", config.server.host, config.server.port)).await?;
-    
-    info!("Server starting on {}:{}", config.server.host, config.server.port);
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", config.server.host, config.server.port))
+            .await?;
+
+    info!(
+        "Server starting on {}:{}",
+        config.server.host, config.server.port
+    );
     axum::serve(listener, app).await?;
 
     Ok(())

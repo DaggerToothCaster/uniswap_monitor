@@ -201,8 +201,8 @@ impl Database {
         .bind(&metadata.explorer_url)
         .bind(&metadata.coingecko_id)
         .bind(&metadata.coinmarketcap_id)
-        .bind(&metadata.total_supply)
-        .bind(&metadata.max_supply)
+        .bind(metadata.total_supply)
+        .bind(metadata.max_supply)
         .bind(&tags_json)
         .fetch_one(&self.pool)
         .await?;

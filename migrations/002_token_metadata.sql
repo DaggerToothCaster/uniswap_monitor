@@ -1,4 +1,37 @@
 -- Create token_metadata table
+-- ============================================================================
+-- Table: token_metadata
+-- ----------------------------------------------------------------------------
+-- Stores metadata information for tokens across different blockchain networks.
+--
+-- Columns:
+--   id                : UUID, primary key, auto-generated unique identifier.
+--   chain_id          : INTEGER, identifier of the blockchain network.
+--   address           : VARCHAR(42), token contract address (unique per chain).
+--   symbol            : VARCHAR(20), token symbol (e.g., ETH, USDT).
+--   name              : VARCHAR(100), full name of the token.
+--   decimals          : INTEGER, number of decimal places the token uses.
+--   description       : TEXT, optional description of the token.
+--   website_url       : VARCHAR(500), optional official website URL.
+--   logo_url          : VARCHAR(500), optional logo image URL.
+--   twitter_url       : VARCHAR(500), optional Twitter profile URL.
+--   telegram_url      : VARCHAR(500), optional Telegram group/channel URL.
+--   discord_url       : VARCHAR(500), optional Discord server URL.
+--   github_url        : VARCHAR(500), optional GitHub repository URL.
+--   explorer_url      : VARCHAR(500), optional blockchain explorer URL.
+--   coingecko_id      : VARCHAR(100), optional CoinGecko identifier.
+--   coinmarketcap_id  : VARCHAR(100), optional CoinMarketCap identifier.
+--   total_supply      : DECIMAL, optional total supply of the token.
+--   max_supply        : DECIMAL, optional maximum supply of the token.
+--   is_verified       : BOOLEAN, indicates if the token is verified (default: FALSE).
+--   tags              : JSONB, optional array of tags or categories.
+--   created_at        : TIMESTAMPTZ, record creation timestamp (default: NOW()).
+--   updated_at        : TIMESTAMPTZ, record last update timestamp (default: NOW()).
+--
+-- Constraints:
+--   - Primary key on 'id'.
+--   - Unique constraint on (chain_id, address) to prevent duplicate tokens per chain.
+-- ============================================================================
 CREATE TABLE IF NOT EXISTS token_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     chain_id INTEGER NOT NULL,
