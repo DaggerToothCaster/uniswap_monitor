@@ -1,6 +1,6 @@
 use crate::models::*;
 use anyhow::Result;
-use bigdecimal::BigDecimal;
+use rust_decimal::Decimal;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;

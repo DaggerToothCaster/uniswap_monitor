@@ -1,13 +1,14 @@
 use crate::database::Database;
 use crate::models::*;
 use anyhow::Result;
-// use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use ethers::{
     contract::{abigen, Contract, EthLogDecode},
+    core::abi::RawLog,
     providers::{Http, Middleware, Provider},
     types::{Address, BlockNumber, Filter, Log, U256},
 };
+use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -187,11 +188,10 @@ impl EventListener {
     }
 
     async fn handle_pair_created_event(&self, log: Log) -> Result<()> {
-        let raw_log = ethers::contract::RawLog {
+        let event = PairCreatedFilter::decode_log(&RawLog {
             topics: log.topics.clone(),
-            data: log.data.0.clone(),
-        };
-        let event = PairCreatedFilter::decode_log(&raw_log)?;
+            data: log.data.0.to_vec(),
+        })?;
 
         let block = self.provider.get_block(log.block_number.unwrap()).await?;
         let timestamp = DateTime::from_timestamp(block.unwrap().timestamp.as_u64() as i64, 0)
@@ -257,10 +257,10 @@ impl EventListener {
                 chain_id: self.chain_id as i32,
                 pair_address: format!("0x{:x}", pair_address),
                 sender: format!("0x{:x}", sender),
-                amount0_in: BigDecimal::from(amount0_in.as_u128()),
-                amount1_in: BigDecimal::from(amount1_in.as_u128()),
-                amount0_out: BigDecimal::from(amount0_out.as_u128()),
-                amount1_out: BigDecimal::from(amount1_out.as_u128()),
+                amount0_in: Decimal::from(amount0_in.as_u128()),
+                amount1_in: Decimal::from(amount1_in.as_u128()),
+                amount0_out: Decimal::from(amount0_out.as_u128()),
+                amount1_out: Decimal::from(amount1_out.as_u128()),
                 to_address: format!("0x{:x}", to),
                 block_number: log.block_number.unwrap().as_u64() as i64,
                 transaction_hash: format!("0x{:x}", log.transaction_hash.unwrap()),
