@@ -193,9 +193,24 @@ impl EventListener {
             data: log.data.0.to_vec(),
         })?;
 
-        let block = self.provider.get_block(log.block_number.unwrap()).await?;
-        let timestamp = DateTime::from_timestamp(block.unwrap().timestamp.as_u64() as i64, 0)
-            .unwrap_or_else(|| Utc::now());
+        let block_number = log.block_number.unwrap();
+        let block_number_hex = format!("0x{:x}", block_number);
+
+        let raw_block: serde_json::Value = self
+            .provider
+            .request(
+                "eth_getBlockByNumber",
+                serde_json::json!([block_number_hex, false]),
+            )
+            .await?;
+
+        let timestamp_hex = raw_block["timestamp"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing timestamp field"))?;
+
+        let timestamp_u64 = u64::from_str_radix(timestamp_hex.trim_start_matches("0x"), 16)?;
+        let timestamp =
+            DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
 
         let pair = TradingPair {
             id: Uuid::new_v4(),
@@ -228,9 +243,24 @@ impl EventListener {
     }
 
     async fn handle_pair_event(&self, log: Log) -> Result<()> {
-        let block = self.provider.get_block(log.block_number.unwrap()).await?;
-        let timestamp = DateTime::from_timestamp(block.unwrap().timestamp.as_u64() as i64, 0)
-            .unwrap_or_else(|| Utc::now());
+        let block_number = log.block_number.unwrap();
+        let block_number_hex = format!("0x{:x}", block_number);
+
+        let raw_block: serde_json::Value = self
+            .provider
+            .request(
+                "eth_getBlockByNumber",
+                serde_json::json!([block_number_hex, false]),
+            )
+            .await?;
+
+        let timestamp_hex = raw_block["timestamp"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing timestamp field"))?;
+
+        let timestamp_u64 = u64::from_str_radix(timestamp_hex.trim_start_matches("0x"), 16)?;
+        let timestamp =
+            DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
 
         let pair_address = log.address;
         let event_signature = &log.topics[0];
