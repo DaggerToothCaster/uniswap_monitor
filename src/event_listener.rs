@@ -1,18 +1,18 @@
 use crate::database::Database;
 use crate::models::*;
 use anyhow::Result;
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use ethers::{
     contract::{abigen, Contract, EthLogDecode},
-    providers::{Provider, Http, Middleware},
-    types::{Address, Filter, Log, U256, BlockNumber},
+    providers::{Http, Middleware, Provider},
+    types::{Address, BlockNumber, Filter, Log, U256},
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use bigdecimal::BigDecimal;
 
 abigen!(
     UniswapV2Factory,
@@ -53,24 +53,44 @@ impl EventListener {
     }
 
     pub async fn start_monitoring(&mut self) -> Result<()> {
-        info!("Starting event monitoring for chain {} with polling...", self.chain_id);
+        info!(
+            "Starting event monitoring for chain {} with polling...",
+            self.chain_id
+        );
 
         // Get the last processed block from database
-        if let Some(last_block) = self.database.get_last_processed_block(self.chain_id as i32).await? {
+        if let Some(last_block) = self
+            .database
+            .get_last_processed_block(self.chain_id as i32)
+            .await?
+        {
             self.last_processed_block = last_block;
-            info!("Chain {}: Resuming from block: {}", self.chain_id, last_block);
+            info!(
+                "Chain {}: Resuming from block: {}",
+                self.chain_id, last_block
+            );
         } else {
-            info!("Chain {}: Starting from configured block: {}", self.chain_id, self.last_processed_block);
+            info!(
+                "Chain {}: Starting from configured block: {}",
+                self.chain_id, self.last_processed_block
+            );
         }
 
         // Load existing pairs and start monitoring them
-        let pairs = self.database.get_all_pairs(Some(self.chain_id as i32)).await?;
+        let pairs = self
+            .database
+            .get_all_pairs(Some(self.chain_id as i32))
+            .await?;
         let pair_addresses: Vec<Address> = pairs
             .iter()
             .filter_map(|p| p.address.parse().ok())
             .collect();
 
-        info!("Chain {}: Monitoring {} existing pairs", self.chain_id, pair_addresses.len());
+        info!(
+            "Chain {}: Monitoring {} existing pairs",
+            self.chain_id,
+            pair_addresses.len()
+        );
 
         loop {
             if let Err(e) = self.poll_events(&pair_addresses).await {
@@ -78,14 +98,14 @@ impl EventListener {
                 // Wait a bit before retrying
                 sleep(Duration::from_secs(5)).await;
             }
-            
+
             sleep(self.poll_interval).await;
         }
     }
 
     async fn poll_events(&mut self, existing_pairs: &[Address]) -> Result<()> {
         let latest_block = self.provider.get_block_number().await?.as_u64();
-        
+
         if latest_block <= self.last_processed_block {
             return Ok(());
         }
@@ -93,13 +113,17 @@ impl EventListener {
         let from_block = self.last_processed_block + 1;
         let to_block = std::cmp::min(from_block + 1000, latest_block);
 
-        info!("Chain {}: Processing blocks {} to {}", self.chain_id, from_block, to_block);
+        info!(
+            "Chain {}: Processing blocks {} to {}",
+            self.chain_id, from_block, to_block
+        );
 
         // Poll for new pairs
         self.poll_factory_events(from_block, to_block).await?;
 
         // Poll for pair events
-        self.poll_pair_events(existing_pairs, from_block, to_block).await?;
+        self.poll_pair_events(existing_pairs, from_block, to_block)
+            .await?;
 
         self.last_processed_block = to_block;
         Ok(())
@@ -113,17 +137,35 @@ impl EventListener {
             .event("PairCreated(address,address,address,uint256)");
 
         let logs = self.provider.get_logs(&filter).await?;
+        // 打印logs
+        for log in &logs {
+            match serde_json::to_string_pretty(log) {
+                Ok(json) => info!("Chain {}: PairCreated log:\n{}", self.chain_id, json),
+                Err(e) => warn!(
+                    "Chain {}: Failed to serialize log to JSON: {}",
+                    self.chain_id, e
+                ),
+            }
+        }
 
         for log in logs {
             if let Err(e) = self.handle_pair_created_event(log).await {
-                error!("Chain {}: Error handling PairCreated event: {}", self.chain_id, e);
+                error!(
+                    "Chain {}: Error handling PairCreated event: {}",
+                    self.chain_id, e
+                );
             }
         }
 
         Ok(())
     }
 
-    async fn poll_pair_events(&self, pair_addresses: &[Address], from_block: u64, to_block: u64) -> Result<()> {
+    async fn poll_pair_events(
+        &self,
+        pair_addresses: &[Address],
+        from_block: u64,
+        to_block: u64,
+    ) -> Result<()> {
         if pair_addresses.is_empty() {
             return Ok(());
         }
@@ -150,7 +192,7 @@ impl EventListener {
             data: log.data.0.clone(),
         };
         let event = PairCreatedFilter::decode_log(&raw_log)?;
-        
+
         let block = self.provider.get_block(log.block_number.unwrap()).await?;
         let timestamp = DateTime::from_timestamp(block.unwrap().timestamp.as_u64() as i64, 0)
             .unwrap_or_else(|| Utc::now());
@@ -173,11 +215,14 @@ impl EventListener {
         };
 
         self.database.insert_trading_pair(&pair).await?;
-        
+
         // Notify frontend about new pair
         let _ = self.event_sender.send(serde_json::to_string(&pair)?);
-        
-        info!("Chain {}: New pair created: {} - {}/{}", self.chain_id, pair.address, pair.token0, pair.token1);
+
+        info!(
+            "Chain {}: New pair created: {} - {}/{}",
+            self.chain_id, pair.address, pair.token0, pair.token1
+        );
 
         Ok(())
     }
@@ -189,14 +234,18 @@ impl EventListener {
 
         let pair_address = log.address;
         let event_signature = &log.topics[0];
-        
+
         // Swap event signature: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
-        let swap_signature = [0xd7, 0x8a, 0xd9, 0x5f, 0xa4, 0x6c, 0x99, 0x4b, 0x6e, 0x6f, 0x0d, 0x4a, 0xaa, 0x7c, 0xe5, 0xbd, 0x1e, 0xdd, 0x3e, 0x86, 0xef, 0x3e, 0x7e, 0x93, 0xb2, 0xa0, 0x8c, 0x5d, 0x0e, 0x57, 0x9b, 0x9b];
-        
+        let swap_signature = [
+            0xd7, 0x8a, 0xd9, 0x5f, 0xa4, 0x6c, 0x99, 0x4b, 0x6e, 0x6f, 0x0d, 0x4a, 0xaa, 0x7c,
+            0xe5, 0xbd, 0x1e, 0xdd, 0x3e, 0x86, 0xef, 0x3e, 0x7e, 0x93, 0xb2, 0xa0, 0x8c, 0x5d,
+            0x0e, 0x57, 0x9b, 0x9b,
+        ];
+
         if event_signature.as_bytes() == swap_signature {
             let sender = Address::from_slice(&log.topics[1][12..]);
             let to = Address::from_slice(&log.topics[2][12..]);
-            
+
             let data = &log.data;
             let amount0_in = U256::from_big_endian(&data[0..32]);
             let amount1_in = U256::from_big_endian(&data[32..64]);
@@ -221,8 +270,11 @@ impl EventListener {
 
             self.database.insert_swap_event(&swap_event).await?;
             let _ = self.event_sender.send(serde_json::to_string(&swap_event)?);
-            
-            info!("Chain {}: Swap event processed for pair: {}", self.chain_id, swap_event.pair_address);
+
+            info!(
+                "Chain {}: Swap event processed for pair: {}",
+                self.chain_id, swap_event.pair_address
+            );
         }
 
         Ok(())
