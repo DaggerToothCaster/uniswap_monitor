@@ -19,7 +19,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 config = "0.14"
 dotenv = "0.15"
-bigdecimal = { version = "0.5", features = ["serde"] }
+bigdecimal = { version = "0.4.8", features = ["serde"] }
 hex = "0.4"
 
 [dev-dependencies]
