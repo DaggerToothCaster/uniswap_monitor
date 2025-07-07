@@ -1,9 +1,9 @@
 use crate::models::*;
 use anyhow::Result;
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
-use bigdecimal::BigDecimal;
 
 pub struct Database {
     pool: PgPool,
@@ -149,17 +149,21 @@ impl Database {
             .execute(&self.pool)
             .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(symbol)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(symbol)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_swap_events_chain_pair ON swap_events(chain_id, pair_address)")
             .execute(&self.pool)
             .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_swap_events_timestamp ON swap_events(timestamp)")
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_swap_events_timestamp ON swap_events(timestamp)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_mint_events_chain_pair ON mint_events(chain_id, pair_address)")
             .execute(&self.pool)
@@ -173,9 +177,15 @@ impl Database {
     }
 
     // Token Metadata CRUD operations
-    pub async fn create_token_metadata(&self, metadata: &CreateTokenMetadata) -> Result<TokenMetadata> {
-        let tags_json = metadata.tags.as_ref().map(|tags| serde_json::to_value(tags).unwrap());
-        
+    pub async fn create_token_metadata(
+        &self,
+        metadata: &CreateTokenMetadata,
+    ) -> Result<TokenMetadata> {
+        let tags_json = metadata
+            .tags
+            .as_ref()
+            .map(|tags| serde_json::to_value(tags).unwrap());
+
         let row = sqlx::query(
             r#"
             INSERT INTO token_metadata 
@@ -210,14 +220,16 @@ impl Database {
         Ok(self.row_to_token_metadata(row)?)
     }
 
-    pub async fn get_token_metadata(&self, chain_id: i32, address: &str) -> Result<Option<TokenMetadata>> {
-        let row = sqlx::query(
-            "SELECT * FROM token_metadata WHERE chain_id = $1 AND address = $2"
-        )
-        .bind(chain_id)
-        .bind(address)
-        .fetch_optional(&self.pool)
-        .await?;
+    pub async fn get_token_metadata(
+        &self,
+        chain_id: i32,
+        address: &str,
+    ) -> Result<Option<TokenMetadata>> {
+        let row = sqlx::query("SELECT * FROM token_metadata WHERE chain_id = $1 AND address = $2")
+            .bind(chain_id)
+            .bind(address)
+            .fetch_optional(&self.pool)
+            .await?;
 
         if let Some(row) = row {
             Ok(Some(self.row_to_token_metadata(row)?))
@@ -226,9 +238,17 @@ impl Database {
         }
     }
 
-    pub async fn update_token_metadata(&self, chain_id: i32, address: &str, update: &UpdateTokenMetadata) -> Result<Option<TokenMetadata>> {
-        let tags_json = update.tags.as_ref().map(|tags| serde_json::to_value(tags).unwrap());
-        
+    pub async fn update_token_metadata(
+        &self,
+        chain_id: i32,
+        address: &str,
+        update: &UpdateTokenMetadata,
+    ) -> Result<Option<TokenMetadata>> {
+        let tags_json = update
+            .tags
+            .as_ref()
+            .map(|tags| serde_json::to_value(tags).unwrap());
+
         let row = sqlx::query(
             r#"
             UPDATE token_metadata SET
@@ -284,18 +304,21 @@ impl Database {
     }
 
     pub async fn delete_token_metadata(&self, chain_id: i32, address: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM token_metadata WHERE chain_id = $1 AND address = $2"
-        )
-        .bind(chain_id)
-        .bind(address)
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM token_metadata WHERE chain_id = $1 AND address = $2")
+            .bind(chain_id)
+            .bind(address)
+            .execute(&self.pool)
+            .await?;
 
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn list_token_metadata(&self, chain_id: Option<i32>, limit: i32, offset: i32) -> Result<Vec<TokenMetadata>> {
+    pub async fn list_token_metadata(
+        &self,
+        chain_id: Option<i32>,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<TokenMetadata>> {
         let query = if let Some(chain_id) = chain_id {
             sqlx::query("SELECT * FROM token_metadata WHERE chain_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3")
                 .bind(chain_id)
@@ -309,7 +332,7 @@ impl Database {
 
         let rows = query.fetch_all(&self.pool).await?;
         let mut tokens = Vec::new();
-        
+
         for row in rows {
             tokens.push(self.row_to_token_metadata(row)?);
         }
@@ -317,16 +340,20 @@ impl Database {
         Ok(tokens)
     }
 
-    pub async fn get_token_detail(&self, chain_id: i32, address: &str) -> Result<Option<TokenDetail>> {
+    pub async fn get_token_detail(
+        &self,
+        chain_id: i32,
+        address: &str,
+    ) -> Result<Option<TokenDetail>> {
         let metadata = self.get_token_metadata(chain_id, address).await?;
-        
+
         if let Some(metadata) = metadata {
             // Get price info
             let price_info = self.get_token_price_info(chain_id, address).await?;
-            
+
             // Get trading pairs
             let trading_pairs = self.get_token_trading_pairs(chain_id, address).await?;
-            
+
             Ok(Some(TokenDetail {
                 metadata,
                 price_info,
@@ -337,13 +364,21 @@ impl Database {
         }
     }
 
-    async fn get_token_price_info(&self, chain_id: i32, address: &str) -> Result<Option<TokenPriceInfo>> {
+    async fn get_token_price_info(
+        &self,
+        chain_id: i32,
+        address: &str,
+    ) -> Result<Option<TokenPriceInfo>> {
         // This would calculate price info from swap events
         // For now, return None - implement based on your price calculation logic
         Ok(None)
     }
 
-    async fn get_token_trading_pairs(&self, chain_id: i32, address: &str) -> Result<Vec<TradingPairInfo>> {
+    async fn get_token_trading_pairs(
+        &self,
+        chain_id: i32,
+        address: &str,
+    ) -> Result<Vec<TradingPairInfo>> {
         let rows = sqlx::query(
             r#"
             SELECT 
@@ -363,7 +398,7 @@ impl Database {
             LEFT JOIN token_metadata tm0 ON tm0.chain_id = tp.chain_id AND tm0.address = tp.token0
             LEFT JOIN token_metadata tm1 ON tm1.chain_id = tp.chain_id AND tm1.address = tp.token1
             WHERE tp.chain_id = $1 AND (tp.token0 = $2 OR tp.token1 = $2)
-            "#
+            "#,
         )
         .bind(chain_id)
         .bind(address)
@@ -426,7 +461,7 @@ impl Database {
                 SELECT block_number FROM mint_events WHERE chain_id = $1
                 UNION ALL
                 SELECT block_number FROM burn_events WHERE chain_id = $1
-            ) AS all_blocks"
+            ) AS all_blocks",
         )
         .bind(chain_id)
         .fetch_one(&self.pool)
@@ -492,20 +527,22 @@ impl Database {
     pub async fn get_all_pairs(&self, chain_id: Option<i32>) -> Result<Vec<TradingPair>> {
         let query = if let Some(chain_id) = chain_id {
             sqlx::query_as::<_, TradingPair>(
-                "SELECT * FROM trading_pairs WHERE chain_id = $1 ORDER BY created_at DESC"
+                "SELECT * FROM trading_pairs WHERE chain_id = $1 ORDER BY created_at DESC",
             )
             .bind(chain_id)
         } else {
-            sqlx::query_as::<_, TradingPair>(
-                "SELECT * FROM trading_pairs ORDER BY created_at DESC"
-            )
+            sqlx::query_as::<_, TradingPair>("SELECT * FROM trading_pairs ORDER BY created_at DESC")
         };
 
         let pairs = query.fetch_all(&self.pool).await?;
         Ok(pairs)
     }
 
-    pub async fn get_token_list(&self, chain_id: Option<i32>, limit: i32) -> Result<Vec<TokenListItem>> {
+    pub async fn get_token_list(
+        &self,
+        chain_id: Option<i32>,
+        limit: i32,
+    ) -> Result<Vec<TokenListItem>> {
         let chain_filter = if let Some(chain_id) = chain_id {
             format!("WHERE tp.chain_id = {}", chain_id)
         } else {
@@ -643,7 +680,7 @@ impl Database {
         for row in rows {
             let token0_tags_json: Option<serde_json::Value> = row.get("token0_tags");
             let token1_tags_json: Option<serde_json::Value> = row.get("token1_tags");
-            
+
             let token0_tags = token0_tags_json.and_then(|v| serde_json::from_value(v).ok());
             let token1_tags = token1_tags_json.and_then(|v| serde_json::from_value(v).ok());
 
@@ -687,9 +724,8 @@ impl Database {
             SELECT 
                 tp.chain_id,
                 CASE 
-                    WHEN tp.chain_id = 1 THEN 'Ethereum'
-                    WHEN tp.chain_id = 56 THEN 'BSC'
-                    WHEN tp.chain_id = 137 THEN 'Polygon'
+                    WHEN tp.chain_id = 2643 THEN 'NOSChain'
+                    WHEN tp.chain_id = 2559 THEN 'KtoChain'
                     ELSE 'Unknown'
                 END as chain_name,
                 COUNT(DISTINCT tp.address) as total_pairs,
@@ -715,7 +751,7 @@ impl Database {
             FROM trading_pairs tp
             GROUP BY tp.chain_id
             ORDER BY total_volume_24h DESC
-            "#
+            "#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -780,7 +816,10 @@ impl Database {
             ORDER BY interval_start DESC
             LIMIT $3
             "#,
-            interval_seconds, interval_seconds, interval_seconds, interval_seconds * limit as i64
+            interval_seconds,
+            interval_seconds,
+            interval_seconds,
+            interval_seconds * limit as i64
         );
 
         let rows = sqlx::query(&query)
