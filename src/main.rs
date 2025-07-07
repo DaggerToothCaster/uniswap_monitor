@@ -35,29 +35,37 @@ async fn main() -> Result<()> {
     database.create_tables().await?;
     info!("Database connected and tables created");
 
-    // Connect to Ethereum
-    let provider = Arc::new(Provider::<Http>::try_from(&config.ethereum.rpc_url)?);
-    info!("Connected to Ethereum HTTP RPC");
-
     // Create event broadcast channel
     let (event_sender, _) = broadcast::channel(1000);
 
-    // Start event listener
-    let factory_address: Address = config.ethereum.factory_address.parse()?;
-    let mut event_listener = EventListener::new(
-        Arc::clone(&provider),
-        Arc::clone(&database),
-        factory_address,
-        event_sender.clone(),
-        config.ethereum.poll_interval,
-        config.ethereum.start_block,
-    );
-
-    tokio::spawn(async move {
-        if let Err(e) = event_listener.start_monitoring().await {
-            tracing::error!("Event listener error: {}", e);
+    // Start event listeners for each enabled chain
+    for (chain_id, chain_config) in &config.chains {
+        if !chain_config.enabled {
+            info!("Chain {} ({}) is disabled, skipping", chain_id, chain_config.name);
+            continue;
         }
-    });
+
+        info!("Starting monitoring for chain {} ({})", chain_id, chain_config.name);
+
+        let provider = Arc::new(Provider::<Http>::try_from(&chain_config.rpc_url)?);
+        let factory_address: Address = chain_config.factory_address.parse()?;
+        
+        let mut event_listener = EventListener::new(
+            provider,
+            Arc::clone(&database),
+            *chain_id,
+            factory_address,
+            event_sender.clone(),
+            chain_config.poll_interval,
+            chain_config.start_block,
+        );
+
+        tokio::spawn(async move {
+            if let Err(e) = event_listener.start_monitoring().await {
+                tracing::error!("Event listener error for chain {}: {}", chain_id, e);
+            }
+        });
+    }
 
     // Start API server
     let api_state = ApiState {

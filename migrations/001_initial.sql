@@ -1,6 +1,7 @@
 -- Create trading pairs table
 CREATE TABLE IF NOT EXISTS trading_pairs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chainId INTEGER,
     address VARCHAR(42) UNIQUE NOT NULL,
     token0 VARCHAR(42) NOT NULL,
     token1 VARCHAR(42) NOT NULL,
