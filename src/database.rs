@@ -40,6 +40,39 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // Create token_metadata table
+        sqlx::query(
+            r#"
+        CREATE TABLE IF NOT EXISTS token_metadata (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            chain_id INTEGER NOT NULL,
+            address VARCHAR(42) NOT NULL,
+            symbol VARCHAR(20) NOT NULL,
+            name VARCHAR(100) NOT NULL,
+            decimals INTEGER NOT NULL,
+            description TEXT,
+            website_url VARCHAR(500),
+            logo_url VARCHAR(500),
+            twitter_url VARCHAR(500),
+            telegram_url VARCHAR(500),
+            discord_url VARCHAR(500),
+            github_url VARCHAR(500),
+            explorer_url VARCHAR(500),
+            coingecko_id VARCHAR(100),
+            coinmarketcap_id VARCHAR(100),
+            total_supply DECIMAL,
+            max_supply DECIMAL,
+            is_verified BOOLEAN DEFAULT FALSE,
+            tags JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE(chain_id, address)
+        )
+        "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
         // Create swap_events table with chain_id
         sqlx::query(
             r#"
@@ -112,6 +145,14 @@ impl Database {
             .execute(&self.pool)
             .await?;
 
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_metadata_chain_address ON token_metadata(chain_id, address)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(symbol)")
+            .execute(&self.pool)
+            .await?;
+
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_swap_events_chain_pair ON swap_events(chain_id, pair_address)")
             .execute(&self.pool)
             .await?;
@@ -131,6 +172,250 @@ impl Database {
         Ok(())
     }
 
+    // Token Metadata CRUD operations
+    pub async fn create_token_metadata(&self, metadata: &CreateTokenMetadata) -> Result<TokenMetadata> {
+        let tags_json = metadata.tags.as_ref().map(|tags| serde_json::to_value(tags).unwrap());
+        
+        let row = sqlx::query(
+            r#"
+            INSERT INTO token_metadata 
+            (chain_id, address, symbol, name, decimals, description, website_url, logo_url, 
+             twitter_url, telegram_url, discord_url, github_url, explorer_url, coingecko_id, 
+             coinmarketcap_id, total_supply, max_supply, tags)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            RETURNING *
+            "#,
+        )
+        .bind(metadata.chain_id)
+        .bind(&metadata.address)
+        .bind(&metadata.symbol)
+        .bind(&metadata.name)
+        .bind(metadata.decimals)
+        .bind(&metadata.description)
+        .bind(&metadata.website_url)
+        .bind(&metadata.logo_url)
+        .bind(&metadata.twitter_url)
+        .bind(&metadata.telegram_url)
+        .bind(&metadata.discord_url)
+        .bind(&metadata.github_url)
+        .bind(&metadata.explorer_url)
+        .bind(&metadata.coingecko_id)
+        .bind(&metadata.coinmarketcap_id)
+        .bind(&metadata.total_supply)
+        .bind(&metadata.max_supply)
+        .bind(&tags_json)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(self.row_to_token_metadata(row)?)
+    }
+
+    pub async fn get_token_metadata(&self, chain_id: i32, address: &str) -> Result<Option<TokenMetadata>> {
+        let row = sqlx::query(
+            "SELECT * FROM token_metadata WHERE chain_id = $1 AND address = $2"
+        )
+        .bind(chain_id)
+        .bind(address)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            Ok(Some(self.row_to_token_metadata(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn update_token_metadata(&self, chain_id: i32, address: &str, update: &UpdateTokenMetadata) -> Result<Option<TokenMetadata>> {
+        let tags_json = update.tags.as_ref().map(|tags| serde_json::to_value(tags).unwrap());
+        
+        let row = sqlx::query(
+            r#"
+            UPDATE token_metadata SET
+                symbol = COALESCE($3, symbol),
+                name = COALESCE($4, name),
+                decimals = COALESCE($5, decimals),
+                description = COALESCE($6, description),
+                website_url = COALESCE($7, website_url),
+                logo_url = COALESCE($8, logo_url),
+                twitter_url = COALESCE($9, twitter_url),
+                telegram_url = COALESCE($10, telegram_url),
+                discord_url = COALESCE($11, discord_url),
+                github_url = COALESCE($12, github_url),
+                explorer_url = COALESCE($13, explorer_url),
+                coingecko_id = COALESCE($14, coingecko_id),
+                coinmarketcap_id = COALESCE($15, coinmarketcap_id),
+                total_supply = COALESCE($16, total_supply),
+                max_supply = COALESCE($17, max_supply),
+                is_verified = COALESCE($18, is_verified),
+                tags = COALESCE($19, tags),
+                updated_at = NOW()
+            WHERE chain_id = $1 AND address = $2
+            RETURNING *
+            "#,
+        )
+        .bind(chain_id)
+        .bind(address)
+        .bind(&update.symbol)
+        .bind(&update.name)
+        .bind(&update.decimals)
+        .bind(&update.description)
+        .bind(&update.website_url)
+        .bind(&update.logo_url)
+        .bind(&update.twitter_url)
+        .bind(&update.telegram_url)
+        .bind(&update.discord_url)
+        .bind(&update.github_url)
+        .bind(&update.explorer_url)
+        .bind(&update.coingecko_id)
+        .bind(&update.coinmarketcap_id)
+        .bind(&update.total_supply)
+        .bind(&update.max_supply)
+        .bind(&update.is_verified)
+        .bind(&tags_json)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            Ok(Some(self.row_to_token_metadata(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn delete_token_metadata(&self, chain_id: i32, address: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM token_metadata WHERE chain_id = $1 AND address = $2"
+        )
+        .bind(chain_id)
+        .bind(address)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_token_metadata(&self, chain_id: Option<i32>, limit: i32, offset: i32) -> Result<Vec<TokenMetadata>> {
+        let query = if let Some(chain_id) = chain_id {
+            sqlx::query("SELECT * FROM token_metadata WHERE chain_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3")
+                .bind(chain_id)
+                .bind(limit)
+                .bind(offset)
+        } else {
+            sqlx::query("SELECT * FROM token_metadata ORDER BY updated_at DESC LIMIT $1 OFFSET $2")
+                .bind(limit)
+                .bind(offset)
+        };
+
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut tokens = Vec::new();
+        
+        for row in rows {
+            tokens.push(self.row_to_token_metadata(row)?);
+        }
+
+        Ok(tokens)
+    }
+
+    pub async fn get_token_detail(&self, chain_id: i32, address: &str) -> Result<Option<TokenDetail>> {
+        let metadata = self.get_token_metadata(chain_id, address).await?;
+        
+        if let Some(metadata) = metadata {
+            // Get price info
+            let price_info = self.get_token_price_info(chain_id, address).await?;
+            
+            // Get trading pairs
+            let trading_pairs = self.get_token_trading_pairs(chain_id, address).await?;
+            
+            Ok(Some(TokenDetail {
+                metadata,
+                price_info,
+                trading_pairs,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_token_price_info(&self, chain_id: i32, address: &str) -> Result<Option<TokenPriceInfo>> {
+        // This would calculate price info from swap events
+        // For now, return None - implement based on your price calculation logic
+        Ok(None)
+    }
+
+    async fn get_token_trading_pairs(&self, chain_id: i32, address: &str) -> Result<Vec<TradingPairInfo>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT 
+                tp.address as pair_address,
+                CASE 
+                    WHEN tp.token0 = $2 THEN COALESCE(tm1.symbol, tp.token1_symbol, 'Unknown')
+                    ELSE COALESCE(tm0.symbol, tp.token0_symbol, 'Unknown')
+                END as other_token_symbol,
+                CASE 
+                    WHEN tp.token0 = $2 THEN COALESCE(tm1.name, tp.token1_name, 'Unknown')
+                    ELSE COALESCE(tm0.name, tp.token0_name, 'Unknown')
+                END as other_token_name,
+                0 as price,
+                0 as volume_24h,
+                0 as liquidity
+            FROM trading_pairs tp
+            LEFT JOIN token_metadata tm0 ON tm0.chain_id = tp.chain_id AND tm0.address = tp.token0
+            LEFT JOIN token_metadata tm1 ON tm1.chain_id = tp.chain_id AND tm1.address = tp.token1
+            WHERE tp.chain_id = $1 AND (tp.token0 = $2 OR tp.token1 = $2)
+            "#
+        )
+        .bind(chain_id)
+        .bind(address)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut pairs = Vec::new();
+        for row in rows {
+            pairs.push(TradingPairInfo {
+                pair_address: row.get("pair_address"),
+                other_token_symbol: row.get("other_token_symbol"),
+                other_token_name: row.get("other_token_name"),
+                price: row.get("price"),
+                volume_24h: row.get("volume_24h"),
+                liquidity: row.get("liquidity"),
+            });
+        }
+
+        Ok(pairs)
+    }
+
+    fn row_to_token_metadata(&self, row: sqlx::postgres::PgRow) -> Result<TokenMetadata> {
+        let tags_json: Option<serde_json::Value> = row.get("tags");
+        let tags = tags_json.and_then(|v| serde_json::from_value(v).ok());
+
+        Ok(TokenMetadata {
+            id: row.get("id"),
+            chain_id: row.get("chain_id"),
+            address: row.get("address"),
+            symbol: row.get("symbol"),
+            name: row.get("name"),
+            decimals: row.get("decimals"),
+            description: row.get("description"),
+            website_url: row.get("website_url"),
+            logo_url: row.get("logo_url"),
+            twitter_url: row.get("twitter_url"),
+            telegram_url: row.get("telegram_url"),
+            discord_url: row.get("discord_url"),
+            github_url: row.get("github_url"),
+            explorer_url: row.get("explorer_url"),
+            coingecko_id: row.get("coingecko_id"),
+            coinmarketcap_id: row.get("coinmarketcap_id"),
+            total_supply: row.get("total_supply"),
+            max_supply: row.get("max_supply"),
+            is_verified: row.get("is_verified"),
+            tags,
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
+    // Existing methods...
     pub async fn get_last_processed_block(&self, chain_id: i32) -> Result<Option<u64>> {
         let result = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT MAX(block_number) FROM (
@@ -233,10 +518,20 @@ impl Database {
                 SELECT 
                     tp.chain_id,
                     tp.address as pair_address,
-                    tp.token0_symbol,
-                    tp.token1_symbol,
-                    tp.token0_name,
-                    tp.token1_name,
+                    COALESCE(tm0.symbol, tp.token0_symbol, 'Unknown') as token0_symbol,
+                    COALESCE(tm1.symbol, tp.token1_symbol, 'Unknown') as token1_symbol,
+                    COALESCE(tm0.name, tp.token0_name, 'Unknown') as token0_name,
+                    COALESCE(tm1.name, tp.token1_name, 'Unknown') as token1_name,
+                    tm0.logo_url as token0_logo_url,
+                    tm1.logo_url as token1_logo_url,
+                    tm0.website_url as token0_website_url,
+                    tm1.website_url as token1_website_url,
+                    tm0.explorer_url as token0_explorer_url,
+                    tm1.explorer_url as token1_explorer_url,
+                    tm0.description as token0_description,
+                    tm1.description as token1_description,
+                    tm0.tags as token0_tags,
+                    tm1.tags as token1_tags,
                     -- Calculate current price from latest swap
                     COALESCE(
                         (SELECT 
@@ -249,21 +544,20 @@ impl Database {
                         WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id
                         ORDER BY se.timestamp DESC LIMIT 1), 0
                     ) as current_price,
-                    -- Volume 1h
+                    -- Volume calculations...
                     COALESCE(
                         (SELECT SUM(amount0_in + amount0_out + amount1_in + amount1_out)
                         FROM swap_events se 
                         WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id
                         AND se.timestamp >= NOW() - INTERVAL '1 hour'), 0
                     ) as volume_1h,
-                    -- Volume 24h
                     COALESCE(
                         (SELECT SUM(amount0_in + amount0_out + amount1_in + amount1_out)
                         FROM swap_events se 
                         WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id
                         AND se.timestamp >= NOW() - INTERVAL '24 hours'), 0
                     ) as volume_24h,
-                    -- Price 1h ago
+                    -- Price change calculations...
                     COALESCE(
                         (SELECT 
                             CASE 
@@ -276,7 +570,6 @@ impl Database {
                         AND se.timestamp <= NOW() - INTERVAL '1 hour'
                         ORDER BY se.timestamp DESC LIMIT 1), 0
                     ) as price_1h_ago,
-                    -- Price 24h ago
                     COALESCE(
                         (SELECT 
                             CASE 
@@ -288,9 +581,10 @@ impl Database {
                         WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id
                         AND se.timestamp <= NOW() - INTERVAL '24 hours'
                         ORDER BY se.timestamp DESC LIMIT 1), 0
-                    ) as price_24h_ago,
-                    tp.created_at
+                    ) as price_24h_ago
                 FROM trading_pairs tp
+                LEFT JOIN token_metadata tm0 ON tm0.chain_id = tp.chain_id AND tm0.address = tp.token0
+                LEFT JOIN token_metadata tm1 ON tm1.chain_id = tp.chain_id AND tm1.address = tp.token1
                 {}
             )
             SELECT 
@@ -303,10 +597,20 @@ impl Database {
                     ELSE 'Unknown'
                 END as chain_name,
                 pair_address,
-                COALESCE(token0_symbol, 'Unknown') as token0_symbol,
-                COALESCE(token1_symbol, 'Unknown') as token1_symbol,
-                COALESCE(token0_name, token0_symbol, 'Unknown') as token0_name,
-                COALESCE(token1_name, token1_symbol, 'Unknown') as token1_name,
+                token0_symbol,
+                token1_symbol,
+                token0_name,
+                token1_name,
+                token0_logo_url,
+                token1_logo_url,
+                token0_website_url,
+                token1_website_url,
+                token0_explorer_url,
+                token1_explorer_url,
+                token0_description,
+                token1_description,
+                token0_tags,
+                token1_tags,
                 current_price as price_usd,
                 CASE 
                     WHEN price_1h_ago > 0 THEN ((current_price - price_1h_ago) / price_1h_ago * 100)
@@ -337,6 +641,12 @@ impl Database {
 
         let mut tokens = Vec::new();
         for row in rows {
+            let token0_tags_json: Option<serde_json::Value> = row.get("token0_tags");
+            let token1_tags_json: Option<serde_json::Value> = row.get("token1_tags");
+            
+            let token0_tags = token0_tags_json.and_then(|v| serde_json::from_value(v).ok());
+            let token1_tags = token1_tags_json.and_then(|v| serde_json::from_value(v).ok());
+
             tokens.push(TokenListItem {
                 rank: row.get::<i64, _>("rank") as i32,
                 chain_id: row.get("chain_id"),
@@ -346,6 +656,16 @@ impl Database {
                 token1_symbol: row.get("token1_symbol"),
                 token0_name: row.get("token0_name"),
                 token1_name: row.get("token1_name"),
+                token0_logo_url: row.get("token0_logo_url"),
+                token1_logo_url: row.get("token1_logo_url"),
+                token0_website_url: row.get("token0_website_url"),
+                token1_website_url: row.get("token1_website_url"),
+                token0_explorer_url: row.get("token0_explorer_url"),
+                token1_explorer_url: row.get("token1_explorer_url"),
+                token0_description: row.get("token0_description"),
+                token1_description: row.get("token1_description"),
+                token0_tags,
+                token1_tags,
                 price_usd: row.get("price_usd"),
                 price_change_1h: row.get("price_change_1h"),
                 price_change_24h: row.get("price_change_24h"),
