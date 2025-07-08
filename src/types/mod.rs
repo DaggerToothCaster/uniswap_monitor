@@ -1,5 +1,7 @@
-pub mod event_service;
-pub mod api_service;
+pub mod models;
+pub mod events;
+pub mod api_types;
 
-pub use event_service::EventService;
-pub use api_service::ApiService;
+pub use models::*;
+pub use events::*;
+pub use api_types::*;
