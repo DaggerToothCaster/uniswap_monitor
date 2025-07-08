@@ -1,4 +1,6 @@
-use uniswap_monitor::{Config, services::ApiService};
+
+use config::Config;
+use services::ApiService;
 use anyhow::Result;
 use tracing::{info, Level};
 use tracing_subscriber;

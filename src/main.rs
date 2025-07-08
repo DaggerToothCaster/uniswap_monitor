@@ -1,15 +1,23 @@
 // This is now just a wrapper that calls the combined service
-use uniswap_monitor::{Config, services::{EventService, ApiService}};
+
 use anyhow::Result;
+use config::Config;
 use tracing::{info, Level};
 use tracing_subscriber;
 
+mod config;
+mod database;
+mod event_listener;
+mod services;
+mod types;
+mod api;
+
+
+use services::{EventService,ApiService};
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     info!("🔧 启动UniswapV2监控服务 (默认组合模式)...");
     info!("💡 提示: 可以使用以下命令分别启动服务:");
