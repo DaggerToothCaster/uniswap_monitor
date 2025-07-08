@@ -52,6 +52,9 @@ pub struct EventListener {
     poll_interval: Duration,
     last_processed_block: u64,
     start_block: u64,
+    // 新增：区块批次大小配置
+    factory_block_batch_size: u64,
+    pair_block_batch_size: u64,
 }
 
 impl EventListener {
@@ -63,6 +66,8 @@ impl EventListener {
         event_sender: broadcast::Sender<String>,
         poll_interval: u64,
         start_block: u64,
+        factory_block_batch_size: u64,
+        pair_block_batch_size: u64,
     ) -> Self {
         Self {
             provider,
@@ -73,11 +78,15 @@ impl EventListener {
             poll_interval: Duration::from_secs(poll_interval),
             last_processed_block: 0,
             start_block,
+            factory_block_batch_size,
+            pair_block_batch_size,
         }
     }
 
     pub async fn start_monitoring(&mut self) -> Result<()> {
         info!("🚀 启动链 {} 的事件监控服务...", self.chain_id);
+        info!("📊 配置信息 - 工厂批次大小: {}, 交易对批次大小: {}", 
+              self.factory_block_batch_size, self.pair_block_batch_size);
 
         // 初始化最后处理区块记录（如果不存在）
         self.database
@@ -130,14 +139,13 @@ impl EventListener {
                 .await?;
             let pair_addresses: Vec<Address> = pairs
                 .iter()
-                .filter_map(|p| match p.address.parse::<Address>() {
-                    Ok(addr) => Some(addr),
-                    Err(e) => {
-                        warn!(
-                            "链 {}: 无法解析交易对地址 '{}': {}",
-                            self.chain_id, p.address, e
-                        );
-                        None
+                .filter_map(|p| {
+                    match p.address.parse::<Address>() {
+                        Ok(addr) => Some(addr),
+                        Err(e) => {
+                            warn!("链 {}: 无法解析交易对地址 '{}': {}", self.chain_id, p.address, e);
+                            None
+                        }
                     }
                 })
                 .collect();
@@ -192,12 +200,11 @@ impl EventListener {
             pair_addresses.len()
         );
 
-        // 分批处理，避免请求过大
-        let batch_size = 1000u64;
+        // 分批处理，使用配置的批次大小
         let mut current_from = from_block;
 
         while current_from <= to_block {
-            let current_to = std::cmp::min(current_from + batch_size - 1, to_block);
+            let current_to = std::cmp::min(current_from + self.factory_block_batch_size - 1, to_block);
 
             info!(
                 "🔍 链 {}: 手动处理区块 {} 到 {}",
@@ -211,9 +218,7 @@ impl EventListener {
             }
 
             // 处理交易对事件
-            if let Err(e) = self
-                .poll_pair_events(&pair_addresses, current_from, current_to)
-                .await
+            if let Err(e) = self.poll_pair_events(&pair_addresses, current_from, current_to).await
             {
                 error!("❌ 链 {}: 手动处理交易对事件失败: {}", self.chain_id, e);
                 return Err(e);
@@ -239,8 +244,8 @@ impl EventListener {
         }
 
         let from_block = self.last_processed_block + 1;
-        // 限制每次处理的区块数量，避免请求过大
-        let to_block = std::cmp::min(from_block + 100, latest_block); // 减少批次大小以便调试
+        // 使用配置的批次大小限制每次处理的区块数量
+        let to_block = std::cmp::min(from_block + self.pair_block_batch_size - 1, latest_block);
 
         info!(
             "🔍 链 {}: 处理区块 {} 到 {} (共 {} 个区块)",
@@ -260,10 +265,7 @@ impl EventListener {
         }
 
         // 轮询现有交易对的事件 - 失败不阻止区块更新
-        if let Err(e) = self
-            .poll_pair_events(existing_pairs, from_block, to_block)
-            .await
-        {
+        if let Err(e) = self.poll_pair_events(existing_pairs, from_block, to_block).await {
             error!("❌ 链 {}: 处理交易对事件失败: {}", self.chain_id, e);
             has_error = true;
             // 不要 return，继续更新区块
@@ -281,10 +283,7 @@ impl EventListener {
         }
 
         if has_error {
-            warn!(
-                "⚠️ 链 {}: 区块 {} 处理完成，但有部分错误",
-                self.chain_id, to_block
-            );
+            warn!("⚠️ 链 {}: 区块 {} 处理完成，但有部分错误", self.chain_id, to_block);
         } else {
             debug!("✅ 链 {}: 成功处理到区块 {}", self.chain_id, to_block);
         }
@@ -292,10 +291,7 @@ impl EventListener {
         // 如果还有更多区块需要处理，显示进度
         if to_block < latest_block {
             let remaining = latest_block - to_block;
-            info!(
-                "📈 链 {}: 处理进度 - 剩余 {} 个区块",
-                self.chain_id, remaining
-            );
+            info!("📈 链 {}: 处理进度 - 剩余 {} 个区块", self.chain_id, remaining);
         }
 
         Ok(())
@@ -309,8 +305,9 @@ impl EventListener {
             .event("PairCreated(address,address,address,uint256)");
 
         info!(
-            "🏭 链 {}: 查询工厂事件 - 地址: 0x{:x}, 区块: {}-{}",
-            self.chain_id, self.factory_address, from_block, to_block
+            "🏭 链 {}: 查询工厂事件 - 地址: 0x{:x}, 区块: {}-{} (批次大小: {})",
+            self.chain_id, self.factory_address, from_block, to_block, 
+            to_block - from_block + 1
         );
 
         let logs = match self.provider.get_logs(&filter).await {
@@ -324,14 +321,15 @@ impl EventListener {
                     return Ok(());
                 }
                 logs
-            }
+            },
             Err(e) => {
-                // 不要直接返回错误，记录错误但继续处理
-                warn!(
-                    "⚠️ 链 {}: 跳过工厂事件处理，继续处理交易对事件",
-                    self.chain_id
+                error!(
+                    "❌ 链 {}: 获取工厂事件失败: {}",
+                    self.chain_id, e
                 );
-                return Ok(());
+                // 不��直接返回错误，记录错误但继续处理
+                warn!("⚠️ 链 {}: 跳过工厂事件处理，继续处理交易对事件", self.chain_id);
+                return Err(e.into());
             }
         };
 
@@ -386,11 +384,12 @@ impl EventListener {
         }
 
         info!(
-            "💱 链 {}: 开始查询 {} 个交易对的事件 (区块 {}-{})",
+            "💱 链 {}: 开始查询 {} 个交易对的事件 (区块 {}-{}, 批次大小: {})",
             self.chain_id,
             pair_addresses.len(),
             from_block,
-            to_block
+            to_block,
+            to_block - from_block + 1
         );
 
         let mut total_events = 0;
@@ -414,7 +413,10 @@ impl EventListener {
 
             info!(
                 "🔍 链 {}: 发送日志查询请求 - 交易对: 0x{:x}, 区块: {}-{}",
-                self.chain_id, pair_address, from_block, to_block
+                self.chain_id,
+                pair_address,
+                from_block,
+                to_block
             );
 
             let logs = match self.provider.get_logs(&filter).await {
@@ -423,7 +425,10 @@ impl EventListener {
                     if logs.is_empty() {
                         debug!(
                             "📭 链 {}: 交易对 0x{:x} 在区块 {}-{} 中没有发现任何事件",
-                            self.chain_id, pair_address, from_block, to_block
+                            self.chain_id,
+                            pair_address,
+                            from_block,
+                            to_block
                         );
                         continue; // 跳过这个交易对，继续处理下一个
                     }
@@ -457,12 +462,12 @@ impl EventListener {
                     logs
                 }
                 Err(e) => {
-                    // error!(
-                    //     "❌ 链 {}: 交易对 0x{:x} 查询失败: {}",
-                    //     self.chain_id,
-                    //     pair_address,
-                    //     e
-                    // );
+                    error!(
+                        "❌ 链 {}: 交易对 0x{:x} 查询失败: {}",
+                        self.chain_id,
+                        pair_address,
+                        e
+                    );
                     failed_pairs += 1;
                     // 继续处理下一个交易对，不要因为一个交易对失败就停止
                     continue;
@@ -531,9 +536,7 @@ impl EventListener {
     // 辅助函数：根据事件签名获取事件类型名称
     fn get_event_type_from_signature(&self, signature: &H256) -> String {
         // 计算事件签名 - 使用正确的参数名称
-        let swap_signature = H256::from(keccak256(
-            "Swap(address,uint256,uint256,uint256,uint256,address)",
-        ));
+        let swap_signature = H256::from(keccak256("Swap(address,uint256,uint256,uint256,uint256,address)"));
         let mint_signature = H256::from(keccak256("Mint(address,uint256,uint256)"));
         let burn_signature = H256::from(keccak256("Burn(address,uint256,uint256,address)"));
 
@@ -579,7 +582,10 @@ impl EventListener {
         let name = match contract.name().call().await {
             Ok(n) => Some(n),
             Err(e) => {
-                warn!("Failed to get name for token 0x{:x}: {}", token_address, e);
+                warn!(
+                    "Failed to get name for token 0x{:x}: {}",
+                    token_address, e
+                );
                 None
             }
         };
@@ -590,12 +596,12 @@ impl EventListener {
     // 新增：获取交易对的储备量和初始价格
     async fn get_pair_reserves(&self, pair_address: Address) -> Result<(U256, U256, Decimal)> {
         let contract = UniswapV2Pair::new(pair_address, Arc::clone(&self.provider));
-
+        
         let (reserve0, reserve1, _) = contract.get_reserves().call().await?;
-
+        
         let reserve0_u256 = U256::from(reserve0);
         let reserve1_u256 = U256::from(reserve1);
-
+        
         // 计算初始价格 (token1/token0)
         let price = if reserve0_u256 > U256::zero() {
             let price_ratio = reserve1_u256.as_u128() as f64 / reserve0_u256.as_u128() as f64;
@@ -603,22 +609,17 @@ impl EventListener {
         } else {
             Decimal::ZERO
         };
-
+        
         info!(
             "💰 链 {}: 交易对 0x{:x} 储备量 - Reserve0: {}, Reserve1: {}, 价格: {}",
             self.chain_id, pair_address, reserve0_u256, reserve1_u256, price
         );
-
+        
         Ok((reserve0_u256, reserve1_u256, price))
     }
 
     // 新增：创建初始 K 线数据
-    async fn create_initial_kline(
-        &self,
-        pair_address: Address,
-        timestamp: DateTime<Utc>,
-        initial_price: Decimal,
-    ) -> Result<()> {
+    async fn create_initial_kline(&self, pair_address: Address, timestamp: DateTime<Utc>, initial_price: Decimal) -> Result<()> {
         if initial_price > Decimal::ZERO {
             let kline = KlineData {
                 timestamp,
@@ -634,22 +635,19 @@ impl EventListener {
                 "📈 链 {}: 为交易对 0x{:x} 创建初始K线 - 价格: {}, 时间: {}",
                 self.chain_id, pair_address, initial_price, timestamp
             );
-
+            
             // TODO: 调用数据库方法保存 K 线数据
             // self.database.insert_kline_data(self.chain_id as i32, &format!("0x{:x}", pair_address), &kline).await?;
         }
-
+        
         Ok(())
     }
 
     // 新增：手动解析 Swap 事件数据
-    fn parse_swap_event_manually(
-        &self,
-        log: &Log,
-    ) -> Result<(Address, U256, U256, U256, U256, Address)> {
+    fn parse_swap_event_manually(&self, log: &Log) -> Result<(Address, U256, U256, U256, U256, Address)> {
         // Swap 事件的结构：
         // event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
-
+        
         if log.topics.len() < 3 {
             return Err(anyhow::anyhow!("Swap 事件 topics 数量不足"));
         }
@@ -706,10 +704,8 @@ impl EventListener {
 
         // 从链上读取 token 信息
         info!("🔍 链 {}: 读取 token 信息...", self.chain_id);
-        let (token0_symbol, token0_name, token0_decimals) =
-            self.get_token_info(event.token_0).await;
-        let (token1_symbol, token1_name, token1_decimals) =
-            self.get_token_info(event.token_1).await;
+        let (token0_symbol, token0_name, token0_decimals) = self.get_token_info(event.token_0).await;
+        let (token1_symbol, token1_name, token1_decimals) = self.get_token_info(event.token_1).await;
 
         let pair = TradingPair {
             id: Uuid::new_v4(),
@@ -750,10 +746,7 @@ impl EventListener {
         if let Ok((reserve0, reserve1, initial_price)) = self.get_pair_reserves(pair_addr).await {
             if reserve0 > U256::zero() && reserve1 > U256::zero() {
                 // 创建初始 K 线数据
-                if let Err(e) = self
-                    .create_initial_kline(pair_addr, timestamp, initial_price)
-                    .await
-                {
+                if let Err(e) = self.create_initial_kline(pair_addr, timestamp, initial_price).await {
                     warn!(
                         "⚠️ 链 {}: 创建交易对 {} 的初始K线失败: {}",
                         self.chain_id, pair.address, e
@@ -804,9 +797,7 @@ impl EventListener {
         let event_signature = &log.topics[0];
 
         // 使用 keccak256 计算正确的事件签名
-        let swap_signature = H256::from(keccak256(
-            "Swap(address,uint256,uint256,uint256,uint256,address)",
-        ));
+        let swap_signature = H256::from(keccak256("Swap(address,uint256,uint256,uint256,uint256,address)"));
         let mint_signature = H256::from(keccak256("Mint(address,uint256,uint256)"));
         let burn_signature = H256::from(keccak256("Burn(address,uint256,uint256,address)"));
 
@@ -866,7 +857,10 @@ impl EventListener {
                     );
                 }
                 Err(e) => {
-                    warn!("⚠️ 链 {}: ABI 解码失败，尝试手动解析: {}", self.chain_id, e);
+                    warn!(
+                        "⚠️ 链 {}: ABI 解码失败，尝试手动解析: {}",
+                        self.chain_id, e
+                    );
 
                     // 尝试手动解析
                     match self.parse_swap_event_manually(&log) {
@@ -896,16 +890,16 @@ impl EventListener {
                             );
                         }
                         Err(manual_err) => {
-                            error!("❌ 链 {}: 手动解析也失败: {}", self.chain_id, manual_err);
-
+                            error!(
+                                "❌ 链 {}: 手动解析也失败: {}",
+                                self.chain_id, manual_err
+                            );
+                            
                             // 打印原始数据用于调试
                             error!(
                                 "🔍 链 {}: 原始 Swap 事件数据 - topics: {:?}, data: 0x{}",
                                 self.chain_id,
-                                log.topics
-                                    .iter()
-                                    .map(|t| format!("0x{}", hex::encode(t.as_bytes())))
-                                    .collect::<Vec<_>>(),
+                                log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_bytes()))).collect::<Vec<_>>(),
                                 hex::encode(&log.data.0)
                             );
                         }
@@ -951,15 +945,12 @@ impl EventListener {
                 pair_address,
                 hex::encode(event_signature.as_bytes())
             );
-
+            
             // 尝试打印原始日志数据以便调试
             debug!(
                 "🔍 链 {}: 原始日志数据 - topics: {:?}, data: 0x{}",
                 self.chain_id,
-                log.topics
-                    .iter()
-                    .map(|t| format!("0x{}", hex::encode(t.as_bytes())))
-                    .collect::<Vec<_>>(),
+                log.topics.iter().map(|t| format!("0x{}", hex::encode(t.as_bytes()))).collect::<Vec<_>>(),
                 hex::encode(&log.data.0)
             );
         }

@@ -1,18 +1,21 @@
 use crate::database::Database;
-use crate::models::*;
 use crate::event_listener::EventListener;
+use crate::models::*;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
-    routing::{get, post, put, delete},
+    routing::{delete, get, post, put},
     Router,
+};
+use ethers::{
+    providers::{Http, Provider},
+    types::Address,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
-use ethers::{providers::{Provider, Http}, types::Address};
 
 #[derive(Debug, Deserialize)]
 pub struct KlineQuery {
@@ -66,18 +69,23 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/api/pairs/:chain_id/:address/kline", get(get_kline))
         .route("/api/tokens", get(get_token_list))
         .route("/api/chains/stats", get(get_chain_stats))
-        
         // Token metadata management routes
-        .route("/api/metadata/tokens", get(list_token_metadata).post(create_token_metadata))
-        .route("/api/metadata/tokens/:chain_id/:address", 
-               get(get_token_metadata)
-               .put(update_token_metadata)
-               .delete(delete_token_metadata))
-        .route("/api/metadata/tokens/:chain_id/:address/detail", get(get_token_detail))
-        
+        .route(
+            "/api/metadata/tokens",
+            get(list_token_metadata).post(create_token_metadata),
+        )
+        .route(
+            "/api/metadata/tokens/:chain_id/:address",
+            get(get_token_metadata)
+                .put(update_token_metadata)
+                .delete(delete_token_metadata),
+        )
+        .route(
+            "/api/metadata/tokens/:chain_id/:address/detail",
+            get(get_token_detail),
+        )
         // 新增：手动处理区块范围的API
         .route("/api/process/blocks", post(process_block_range))
-        
         // WebSocket
         .route("/api/ws", get(websocket_handler))
         // 在现有的 API 路由中添加一个新的端点来查看处理状态
@@ -101,7 +109,7 @@ async fn process_block_range(
     }
 
     let chain_id = payload.chain_id as u64;
-    
+
     // 获取对应链的 provider 和 factory 地址
     let provider = match state.providers.get(&chain_id) {
         Some(provider) => Arc::clone(provider),
@@ -132,12 +140,17 @@ async fn process_block_range(
         chain_id,
         factory_address,
         state.event_sender.clone(),
-        12, // 临时轮询间隔，这里不会用到
+        12,                 // 临时轮询间隔，这里不会用到
         payload.from_block, // 临时起始区块，这里不会用到
+        100,
+        100,
     );
 
     // 处理指定区块范围
-    match event_listener.process_block_range(payload.from_block, payload.to_block).await {
+    match event_listener
+        .process_block_range(payload.from_block, payload.to_block)
+        .await
+    {
         Ok(_) => {
             let processed_blocks = payload.to_block - payload.from_block + 1;
             Ok(Json(ProcessBlockRangeResponse {
@@ -149,13 +162,11 @@ async fn process_block_range(
                 processed_blocks,
             }))
         }
-        Err(e) => {
-            Ok(Json(ProcessBlockRangeResponse {
-                success: false,
-                message: format!("处理失败: {}", e),
-                processed_blocks: 0,
-            }))
-        }
+        Err(e) => Ok(Json(ProcessBlockRangeResponse {
+            success: false,
+            message: format!("处理失败: {}", e),
+            processed_blocks: 0,
+        })),
     }
 }
 
@@ -178,7 +189,11 @@ async fn get_kline(
     let interval = params.interval.unwrap_or_else(|| "1h".to_string());
     let limit = params.limit.unwrap_or(100);
 
-    match state.database.get_kline_data(&address, chain_id, &interval, limit).await {
+    match state
+        .database
+        .get_kline_data(&address, chain_id, &interval, limit)
+        .await
+    {
         Ok(klines) => Ok(Json(klines)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -232,7 +247,11 @@ async fn update_token_metadata(
     State(state): State<Arc<ApiState>>,
     Json(payload): Json<UpdateTokenMetadata>,
 ) -> Result<Json<TokenMetadata>, StatusCode> {
-    match state.database.update_token_metadata(chain_id, &address, &payload).await {
+    match state
+        .database
+        .update_token_metadata(chain_id, &address, &payload)
+        .await
+    {
         Ok(Some(metadata)) => Ok(Json(metadata)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -243,7 +262,11 @@ async fn delete_token_metadata(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<Arc<ApiState>>,
 ) -> Result<StatusCode, StatusCode> {
-    match state.database.delete_token_metadata(chain_id, &address).await {
+    match state
+        .database
+        .delete_token_metadata(chain_id, &address)
+        .await
+    {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -257,7 +280,11 @@ async fn list_token_metadata(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
-    match state.database.list_token_metadata(params.chain_id, limit, offset).await {
+    match state
+        .database
+        .list_token_metadata(params.chain_id, limit, offset)
+        .await
+    {
         Ok(tokens) => Ok(Json(tokens)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -281,10 +308,7 @@ async fn websocket_handler(
     ws.on_upgrade(|socket| handle_websocket(socket, state))
 }
 
-async fn handle_websocket(
-    mut socket: axum::extract::ws::WebSocket,
-    state: Arc<ApiState>,
-) {
+async fn handle_websocket(mut socket: axum::extract::ws::WebSocket, state: Arc<ApiState>) {
     let mut receiver = state.event_sender.subscribe();
 
     while let Ok(message) = receiver.recv().await {

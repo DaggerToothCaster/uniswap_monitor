@@ -22,6 +22,8 @@ pub struct ChainConfig {
     pub start_block: u64,
     pub poll_interval: u64,
     pub enabled: bool,
+    pub factory_block_batch_size: u64,
+    pub pair_block_batch_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -29,13 +31,25 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 }
-
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DefaultConfig {
+    pub factory_block_batch_size: u64,
+    pub pair_block_batch_size: u64,
+}
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         dotenv::dotenv().ok();
 
         let mut chains = HashMap::new();
-
+        // 加载默认配置
+        let defaults = DefaultConfig {
+            factory_block_batch_size: std::env::var("DEFAULT_FACTORY_BLOCK_BATCH_SIZE")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
+            pair_block_batch_size: std::env::var("DEFAULT_PAIR_BLOCK_BATCH_SIZE")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()?,
+        };
         // NOS
         chains.insert(
             2643,
@@ -53,6 +67,12 @@ impl Config {
                     .parse()?,
                 enabled: std::env::var("NOS_ENABLED")
                     .unwrap_or_else(|_| "false".to_string())
+                    .parse()?,
+                factory_block_batch_size: std::env::var("NOS_FACTORY_BLOCK_BATCH_SIZE")
+                    .unwrap_or_else(|_| defaults.factory_block_batch_size.to_string())
+                    .parse()?,
+                pair_block_batch_size: std::env::var("NOS_PAIR_BLOCK_BATCH_SIZE")
+                    .unwrap_or_else(|_| defaults.pair_block_batch_size.to_string())
                     .parse()?,
             },
         );

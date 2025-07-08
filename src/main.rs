@@ -1,3 +1,6 @@
+#![allow(unused_variables)] // 忽略未使用变量的警告
+#![allow(dead_code)] // 忽略未使用代码的警告
+
 mod api;
 mod config;
 mod database;
@@ -74,6 +77,8 @@ async fn main() -> Result<()> {
         let event_sender_cloned = event_sender.clone();
         let poll_interval = chain_config.poll_interval;
         let start_block = chain_config.start_block;
+        let factory_block_batch_size = chain_config.factory_block_batch_size;
+        let pair_block_batch_size = chain_config.pair_block_batch_size;
 
         tokio::spawn(async move {
             let mut event_listener = EventListener::new(
@@ -84,6 +89,8 @@ async fn main() -> Result<()> {
                 event_sender_cloned,
                 poll_interval,
                 start_block,
+                factory_block_batch_size,
+                pair_block_batch_size,
             );
 
             if let Err(e) = event_listener.start_monitoring().await {
