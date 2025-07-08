@@ -1,6 +1,9 @@
 use crate::database::Database;
 use anyhow::Result;
-use ethers::{providers::{Provider, Http}, types::Address};
+use ethers::{
+    providers::{Http, Provider},
+    types::Address,
+};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -13,6 +16,8 @@ pub struct BaseEventListener {
     pub poll_interval: Duration,
     pub last_processed_block: u64,
     pub start_block: u64,
+    pub factory_block_batch_size: u64,
+    pub pair_block_batch_size: u64,
 }
 
 impl BaseEventListener {
@@ -23,6 +28,8 @@ impl BaseEventListener {
         event_sender: broadcast::Sender<String>,
         poll_interval: u64,
         start_block: u64,
+        factory_block_batch_size: u64,
+        pair_block_batch_size: u64,
     ) -> Self {
         Self {
             provider,
@@ -32,6 +39,8 @@ impl BaseEventListener {
             poll_interval: Duration::from_secs(poll_interval),
             last_processed_block: 0,
             start_block,
+            factory_block_batch_size,
+            pair_block_batch_size,
         }
     }
 
@@ -55,12 +64,14 @@ impl BaseEventListener {
             self.last_processed_block = self.start_block;
             tracing::info!(
                 "📍 链 {}: 使用配置的起始区块: {}",
-                self.chain_id, self.start_block
+                self.chain_id,
+                self.start_block
             );
         } else {
             tracing::info!(
                 "📍 链 {}: 从数据库恢复，上次处理到区块: {}",
-                self.chain_id, self.last_processed_block
+                self.chain_id,
+                self.last_processed_block
             );
         }
 
