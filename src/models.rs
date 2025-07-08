@@ -22,6 +22,16 @@ pub struct TradingPair {
     pub transaction_hash: String,
 }
 
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct LastProcessedBlock {
+    pub id: Uuid,
+    pub chain_id: i32,
+    pub last_block_number: i64,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct TokenMetadata {
     pub id: Uuid,

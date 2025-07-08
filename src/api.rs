@@ -201,3 +201,12 @@ async fn handle_websocket(
         }
     }
 }
+// 添加新的处理函数
+async fn get_processing_status(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<Vec<LastProcessedBlock>>, StatusCode> {
+    match state.database.get_all_last_processed_blocks().await {
+        Ok(blocks) => Ok(Json(blocks)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}

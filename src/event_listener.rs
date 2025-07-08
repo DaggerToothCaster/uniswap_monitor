@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 abigen!(
@@ -30,6 +30,7 @@ pub struct EventListener {
     event_sender: broadcast::Sender<String>,
     poll_interval: Duration,
     last_processed_block: u64,
+    start_block: u64,
 }
 
 impl EventListener {
@@ -49,35 +50,57 @@ impl EventListener {
             factory_address,
             event_sender,
             poll_interval: Duration::from_secs(poll_interval),
-            last_processed_block: start_block,
+            last_processed_block: 0,
+            start_block,
         }
     }
 
     pub async fn start_monitoring(&mut self) -> Result<()> {
-        info!(
-            "Starting event monitoring for chain {} with polling...",
-            self.chain_id
-        );
+        info!("🚀 启动链 {} 的事件监控服务...", self.chain_id);
 
-        // Get the last processed block from database
-        if let Some(last_block) = self
+        // 初始化最后处理区块记录（如果不存在）
+        self.database
+            .initialize_last_processed_block(self.chain_id as i32, self.start_block)
+            .await?;
+
+        // 从数据库获取最后处理的区块
+        self.last_processed_block = self
             .database
             .get_last_processed_block(self.chain_id as i32)
-            .await?
-        {
-            self.last_processed_block = last_block;
+            .await?;
+
+        // 如果数据库中的值为0，使用配置的起始区块
+        if self.last_processed_block == 0 {
+            self.last_processed_block = self.start_block;
             info!(
-                "Chain {}: Resuming from block: {}",
-                self.chain_id, last_block
+                "📍 链 {}: 使用配置的起始区块: {}",
+                self.chain_id, self.start_block
             );
         } else {
             info!(
-                "Chain {}: Starting from configured block: {}",
+                "📍 链 {}: 从数据库恢复，上次处理到区块: {}",
                 self.chain_id, self.last_processed_block
             );
         }
 
-        // Load existing pairs and start monitoring them
+        // 获取当前最新区块
+        let latest_block = self.provider.get_block_number().await?.as_u64();
+        info!("🔗 链 {}: 当前最新区块: {}", self.chain_id, latest_block);
+
+        if self.last_processed_block >= latest_block {
+            info!("✅ 链 {}: 已处理到最新区块，等待新区块...", self.chain_id);
+        } else {
+            let blocks_behind = latest_block - self.last_processed_block;
+            info!(
+                "⏳ 链 {}: 需要处理 {} 个区块 (从 {} 到 {})",
+                self.chain_id,
+                blocks_behind,
+                self.last_processed_block + 1,
+                latest_block
+            );
+        }
+
+        // 加载现有交易对
         let pairs = self
             .database
             .get_all_pairs(Some(self.chain_id as i32))
@@ -88,15 +111,16 @@ impl EventListener {
             .collect();
 
         info!(
-            "Chain {}: Monitoring {} existing pairs",
+            "📊 链 {}: 监控 {} 个现有交易对",
             self.chain_id,
             pair_addresses.len()
         );
 
+        // 开始轮询循环
         loop {
             if let Err(e) = self.poll_events(&pair_addresses).await {
-                error!("Chain {}: Error polling events: {}", self.chain_id, e);
-                // Wait a bit before retrying
+                error!("❌ 链 {}: 轮询事件时出错: {}", self.chain_id, e);
+                // 等待一段时间后重试
                 sleep(Duration::from_secs(5)).await;
             }
 
@@ -107,26 +131,58 @@ impl EventListener {
     async fn poll_events(&mut self, existing_pairs: &[Address]) -> Result<()> {
         let latest_block = self.provider.get_block_number().await?.as_u64();
 
+        // 如果没有新区块，直接返回
         if latest_block <= self.last_processed_block {
+            debug!(
+                "🔄 链 {}: 没有新区块，当前: {}, 最新: {}",
+                self.chain_id, self.last_processed_block, latest_block
+            );
             return Ok(());
         }
 
         let from_block = self.last_processed_block + 1;
+        // 限制每次处理的区块数量，避免请求过大
         let to_block = std::cmp::min(from_block + 1000, latest_block);
 
         info!(
-            "Chain {}: Processing blocks {} to {}",
-            self.chain_id, from_block, to_block
+            "🔍 链 {}: 处理区块 {} 到 {} (共 {} 个区块)",
+            self.chain_id,
+            from_block,
+            to_block,
+            to_block - from_block + 1
         );
 
-        // Poll for new pairs
-        self.poll_factory_events(from_block, to_block).await?;
+        // 轮询工厂合约的新交易对事件
+        if let Err(e) = self.poll_factory_events(from_block, to_block).await {
+            error!("❌ 链 {}: 处理工厂事件失败: {}", self.chain_id, e);
+            return Err(e);
+        }
 
-        // Poll for pair events
-        self.poll_pair_events(existing_pairs, from_block, to_block)
-            .await?;
+        // 轮询现有交易对的事件
+        if let Err(e) = self.poll_pair_events(existing_pairs, from_block, to_block).await {
+            error!("❌ 链 {}: 处理交易对事件失败: {}", self.chain_id, e);
+            return Err(e);
+        }
 
+        // 更新最后处理的区块到数据库
         self.last_processed_block = to_block;
+        if let Err(e) = self
+            .database
+            .update_last_processed_block(self.chain_id as i32, to_block)
+            .await
+        {
+            error!("❌ 链 {}: 更新最后处理区块失败: {}", self.chain_id, e);
+            return Err(e);
+        }
+
+        debug!("✅ 链 {}: 成功处理到区块 {}", self.chain_id, to_block);
+
+        // 如果还有更多区块需要处理，显示进度
+        if to_block < latest_block {
+            let remaining = latest_block - to_block;
+            info!("📈 链 {}: 处理进度 - 剩余 {} 个区块", self.chain_id, remaining);
+        }
+
         Ok(())
     }
 
@@ -137,11 +193,30 @@ impl EventListener {
             .to_block(BlockNumber::Number(to_block.into()))
             .event("PairCreated(address,address,address,uint256)");
 
-        let logs = self.provider.get_logs(&filter).await?;
-        // 打印logs
+        let logs_opt = self.provider.get_logs(&filter).await.ok();
+        let logs = match logs_opt {
+            Some(logs) => logs,
+            None => {
+                warn!(
+                    "Chain {}: No logs returned for PairCreated event (logs is null)",
+                    self.chain_id
+                );
+                return Ok(());
+            }
+        };
+
+        if !logs.is_empty() {
+            info!(
+                "🏭 链 {}: 发现 {} 个新交易对创建事件",
+                self.chain_id,
+                logs.len()
+            );
+        }
+
+        // 打印logs（仅在debug模式下）
         for log in &logs {
             match serde_json::to_string_pretty(log) {
-                Ok(json) => info!("Chain {}: PairCreated log:\n{}", self.chain_id, json),
+                Ok(json) => debug!("Chain {}: PairCreated log:\n{}", self.chain_id, json),
                 Err(e) => warn!(
                     "Chain {}: Failed to serialize log to JSON: {}",
                     self.chain_id, e
@@ -149,12 +224,15 @@ impl EventListener {
             }
         }
 
-        for log in logs {
-            if let Err(e) = self.handle_pair_created_event(log).await {
+        for (index, log) in logs.iter().enumerate() {
+            if let Err(e) = self.handle_pair_created_event(log.clone()).await {
                 error!(
-                    "Chain {}: Error handling PairCreated event: {}",
-                    self.chain_id, e
+                    "❌ 链 {}: 处理第 {} 个PairCreated事件失败: {}",
+                    self.chain_id,
+                    index + 1,
+                    e
                 );
+                // 继续处理其他事件，不要因为一个事件失败就停止
             }
         }
 
@@ -168,19 +246,49 @@ impl EventListener {
         to_block: u64,
     ) -> Result<()> {
         if pair_addresses.is_empty() {
+            debug!("📭 链 {}: 没有交易对需要监控", self.chain_id);
             return Ok(());
         }
 
-        let filter = Filter::new()
-            .address(pair_addresses.to_vec())
-            .from_block(BlockNumber::Number(from_block.into()))
-            .to_block(BlockNumber::Number(to_block.into()));
+        // 分批处理交易对地址，避免请求过大
+        const BATCH_SIZE: usize = 100;
+        for chunk in pair_addresses.chunks(BATCH_SIZE) {
+            let filter = Filter::new()
+                .address(chunk.to_vec())
+                .from_block(BlockNumber::Number(from_block.into()))
+                .to_block(BlockNumber::Number(to_block.into()));
 
-        let logs = self.provider.get_logs(&filter).await?;
+            let logs_opt = self.provider.get_logs(&filter).await.ok();
+            let logs = match logs_opt {
+                Some(logs) => logs,
+                None => {
+                    warn!(
+                        "Chain {}: No logs returned for pair events (logs is null)",
+                        self.chain_id
+                    );
+                    continue;
+                }
+            };
 
-        for log in logs {
-            if let Err(e) = self.handle_pair_event(log).await {
-                error!("Chain {}: Error handling pair event: {}", self.chain_id, e);
+            if !logs.is_empty() {
+                info!(
+                    "💱 链 {}: 在 {} 个交易对中发现 {} 个事件",
+                    self.chain_id,
+                    chunk.len(),
+                    logs.len()
+                );
+            }
+
+            for (index, log) in logs.iter().enumerate() {
+                if let Err(e) = self.handle_pair_event(log.clone()).await {
+                    error!(
+                        "❌ 链 {}: 处理第 {} 个交易对事件失败: {}",
+                        self.chain_id,
+                        index + 1,
+                        e
+                    );
+                    // 继续处理其他事件
+                }
             }
         }
 
@@ -195,7 +303,6 @@ impl EventListener {
 
         let block_number = log.block_number.unwrap();
         let block_number_hex = format!("0x{:x}", block_number);
-
         let raw_block: serde_json::Value = self
             .provider
             .request(
@@ -207,7 +314,6 @@ impl EventListener {
         let timestamp_hex = raw_block["timestamp"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing timestamp field"))?;
-
         let timestamp_u64 = u64::from_str_radix(timestamp_hex.trim_start_matches("0x"), 16)?;
         let timestamp =
             DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
@@ -231,13 +337,14 @@ impl EventListener {
 
         self.database.insert_trading_pair(&pair).await?;
 
-        // Notify frontend about new pair
+        // 通知前端新交易对
         let _ = self.event_sender.send(serde_json::to_string(&pair)?);
 
         info!(
-            "Chain {}: New pair created: {} - {}/{}",
-            self.chain_id, pair.address, pair.token0, pair.token1
+            "🎉 链 {}: 新交易对创建 - {} (区块: {})",
+            self.chain_id, pair.address, pair.block_number
         );
+        info!("   Token0: {} | Token1: {}", pair.token0, pair.token1);
 
         Ok(())
     }
@@ -245,7 +352,6 @@ impl EventListener {
     async fn handle_pair_event(&self, log: Log) -> Result<()> {
         let block_number = log.block_number.unwrap();
         let block_number_hex = format!("0x{:x}", block_number);
-
         let raw_block: serde_json::Value = self
             .provider
             .request(
@@ -257,7 +363,6 @@ impl EventListener {
         let timestamp_hex = raw_block["timestamp"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing timestamp field"))?;
-
         let timestamp_u64 = u64::from_str_radix(timestamp_hex.trim_start_matches("0x"), 16)?;
         let timestamp =
             DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
@@ -265,7 +370,7 @@ impl EventListener {
         let pair_address = log.address;
         let event_signature = &log.topics[0];
 
-        // Swap event signature: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
+        // Swap事件签名: keccak256("Swap(address,uint256,uint256,uint256,uint256,address)")
         let swap_signature = [
             0xd7, 0x8a, 0xd9, 0x5f, 0xa4, 0x6c, 0x99, 0x4b, 0x6e, 0x6f, 0x0d, 0x4a, 0xaa, 0x7c,
             0xe5, 0xbd, 0x1e, 0xdd, 0x3e, 0x86, 0xef, 0x3e, 0x7e, 0x93, 0xb2, 0xa0, 0x8c, 0x5d,
@@ -301,9 +406,9 @@ impl EventListener {
             self.database.insert_swap_event(&swap_event).await?;
             let _ = self.event_sender.send(serde_json::to_string(&swap_event)?);
 
-            info!(
-                "Chain {}: Swap event processed for pair: {}",
-                self.chain_id, swap_event.pair_address
+            debug!(
+                "💱 链 {}: Swap事件 - 交易对: {} (区块: {})",
+                self.chain_id, swap_event.pair_address, swap_event.block_number
             );
         }
 

@@ -1,7 +1,7 @@
 use crate::models::*;
 use anyhow::Result;
-use rust_decimal::Decimal;
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -170,6 +170,25 @@ impl Database {
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_burn_events_chain_pair ON burn_events(chain_id, pair_address)")
+            .execute(&self.pool)
+            .await?;
+
+        // Create last_processed_blocks table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS last_processed_blocks (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chain_id INTEGER UNIQUE NOT NULL,
+                last_block_number BIGINT NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_last_processed_blocks_chain_id ON last_processed_blocks(chain_id)")
             .execute(&self.pool)
             .await?;
 
@@ -450,24 +469,72 @@ impl Database {
         })
     }
 
-    // Existing methods...
-    pub async fn get_last_processed_block(&self, chain_id: i32) -> Result<Option<u64>> {
-        let result = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(block_number) FROM (
-                SELECT block_number FROM trading_pairs WHERE chain_id = $1
-                UNION ALL
-                SELECT block_number FROM swap_events WHERE chain_id = $1
-                UNION ALL
-                SELECT block_number FROM mint_events WHERE chain_id = $1
-                UNION ALL
-                SELECT block_number FROM burn_events WHERE chain_id = $1
-            ) AS all_blocks",
+    // 获取指定链的最后处理区块
+    pub async fn get_last_processed_block(&self, chain_id: i32) -> Result<u64> {
+        let result = sqlx::query_scalar::<_, i64>(
+            "SELECT last_block_number FROM last_processed_blocks WHERE chain_id = $1",
         )
         .bind(chain_id)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
 
-        Ok(result.map(|block| block as u64))
+        Ok(result.unwrap_or(0) as u64)
+    }
+
+    // 更新指定链的最后处理区块
+    pub async fn update_last_processed_block(
+        &self,
+        chain_id: i32,
+        block_number: u64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO last_processed_blocks (chain_id, last_block_number)
+            VALUES ($1, $2)
+            ON CONFLICT (chain_id) 
+            DO UPDATE SET 
+                last_block_number = $2,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_number as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    // 获取所有链的最后处理区块状态
+    pub async fn get_all_last_processed_blocks(&self) -> Result<Vec<LastProcessedBlock>> {
+        let blocks = sqlx::query_as::<_, LastProcessedBlock>(
+            "SELECT * FROM last_processed_blocks ORDER BY chain_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(blocks)
+    }
+
+    // 初始化指定链的最后处理区块（如果不存在）
+    pub async fn initialize_last_processed_block(
+        &self,
+        chain_id: i32,
+        start_block: u64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO last_processed_blocks (chain_id, last_block_number)
+            VALUES ($1, $2)
+            ON CONFLICT (chain_id) DO NOTHING
+            "#,
+        )
+        .bind(chain_id)
+        .bind(start_block as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn insert_trading_pair(&self, pair: &TradingPair) -> Result<()> {
