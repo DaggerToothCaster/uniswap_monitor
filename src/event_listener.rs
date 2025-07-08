@@ -2,14 +2,17 @@ use crate::database::Database;
 use crate::models::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use ethers::types::Bytes;
 use ethers::{
     contract::{abigen, Contract, EthLogDecode},
     core::abi::RawLog,
     providers::{Http, Middleware, Provider},
-    types::{Address, BlockNumber, Filter, Log, U256},
+    types::{Address, BlockNumber, Filter, Log, H256, U256},
 };
 use rust_decimal::Decimal;
+use std::convert::TryInto;
 use std::sync::Arc;
+use std::u8;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
@@ -19,6 +22,24 @@ abigen!(
     UniswapV2Factory,
     r#"[
         event PairCreated(address indexed token0, address indexed token1, address pair, uint256)
+    ]"#
+);
+
+abigen!(
+    ERC20Fixed,
+    r#"[
+        function symbol() external view returns (string)
+        function name() external view returns (string)
+        function decimals() external view returns (uint8)
+    ]"#
+);
+
+abigen!(
+    UniswapV2Pair,
+    r#"[
+        event Mint(address indexed sender, uint256 amount0, uint256 amount1)
+        event Burn(address indexed sender, uint256 amount0, uint256 amount1, address indexed to)
+        event Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
     ]"#
 );
 
@@ -128,6 +149,57 @@ impl EventListener {
         }
     }
 
+    // 新增：处理指定块范围的事件
+    pub async fn process_block_range(&self, from_block: u64, to_block: u64) -> Result<()> {
+        info!(
+            "🔧 链 {}: 手动处理区块范围 {} 到 {}",
+            self.chain_id, from_block, to_block
+        );
+
+        // 加载现有交易对
+        let pairs = self
+            .database
+            .get_all_pairs(Some(self.chain_id as i32))
+            .await?;
+        let pair_addresses: Vec<Address> = pairs
+            .iter()
+            .filter_map(|p| p.address.parse().ok())
+            .collect();
+
+        // 分批处理，避免请求过大
+        let batch_size = 1000u64;
+        let mut current_from = from_block;
+
+        while current_from <= to_block {
+            let current_to = std::cmp::min(current_from + batch_size - 1, to_block);
+
+            info!(
+                "🔍 链 {}: 手动处理区块 {} 到 {}",
+                self.chain_id, current_from, current_to
+            );
+
+            // 处理工厂事件
+            if let Err(e) = self.poll_factory_events(current_from, current_to).await {
+                error!("❌ 链 {}: 手动处理工厂事件失败: {}", self.chain_id, e);
+                return Err(e);
+            }
+
+            // 处理交易对事件
+            if let Err(e) = self
+                .poll_pair_events(&pair_addresses, current_from, current_to)
+                .await
+            {
+                error!("❌ 链 {}: 手动处理交易对事件失败: {}", self.chain_id, e);
+                return Err(e);
+            }
+
+            current_from = current_to + 1;
+        }
+
+        info!("✅ 链 {}: 手动处理完成", self.chain_id);
+        Ok(())
+    }
+
     async fn poll_events(&mut self, existing_pairs: &[Address]) -> Result<()> {
         let latest_block = self.provider.get_block_number().await?.as_u64();
 
@@ -142,7 +214,7 @@ impl EventListener {
 
         let from_block = self.last_processed_block + 1;
         // 限制每次处理的区块数量，避免请求过大
-        let to_block = std::cmp::min(from_block + 1000, latest_block);
+        let to_block = std::cmp::min(from_block + 3000, latest_block);
 
         info!(
             "🔍 链 {}: 处理区块 {} 到 {} (共 {} 个区块)",
@@ -159,7 +231,10 @@ impl EventListener {
         }
 
         // 轮询现有交易对的事件
-        if let Err(e) = self.poll_pair_events(existing_pairs, from_block, to_block).await {
+        if let Err(e) = self
+            .poll_pair_events(existing_pairs, from_block, to_block)
+            .await
+        {
             error!("❌ 链 {}: 处理交易对事件失败: {}", self.chain_id, e);
             return Err(e);
         }
@@ -180,7 +255,10 @@ impl EventListener {
         // 如果还有更多区块需要处理，显示进度
         if to_block < latest_block {
             let remaining = latest_block - to_block;
-            info!("📈 链 {}: 处理进度 - 剩余 {} 个区块", self.chain_id, remaining);
+            info!(
+                "📈 链 {}: 处理进度 - 剩余 {} 个区块",
+                self.chain_id, remaining
+            );
         }
 
         Ok(())
@@ -246,7 +324,7 @@ impl EventListener {
         to_block: u64,
     ) -> Result<()> {
         if pair_addresses.is_empty() {
-            debug!("📭 链 {}: 没有交易对需要监控", self.chain_id);
+            tracing::debug!("📭 链 {}: 没有交易对需要监控", self.chain_id);
             return Ok(());
         }
 
@@ -260,28 +338,53 @@ impl EventListener {
 
             let logs_opt = self.provider.get_logs(&filter).await.ok();
             let logs = match logs_opt {
-                Some(logs) => logs,
+                Some(logs) => {
+                    // 按交易对统计事件数量
+                    let mut event_counts: std::collections::HashMap<Address, usize> =
+                        std::collections::HashMap::new();
+                    for log in &logs {
+                        *event_counts.entry(log.address).or_insert(0) += 1;
+                    }
+
+                    // 打印每个交易对的事件长度
+                    for (pair, count) in event_counts {
+                        tracing::info!(
+                            "======= 链 {}: 交易对 0x{:x} 在区块 {}-{} 中获取到 {} 个事件",
+                            self.chain_id,
+                            pair,
+                            from_block,
+                            to_block,
+                            count
+                        );
+                    }
+
+                    logs
+                }
                 None => {
-                    warn!(
-                        "Chain {}: No logs returned for pair events (logs is null)",
-                        self.chain_id
+                    tracing::warn!(
+                        "链 {}: 在区块 {}-{} 中没有获取到交易对事件",
+                        self.chain_id,
+                        from_block,
+                        to_block
                     );
                     continue;
                 }
             };
 
             if !logs.is_empty() {
-                info!(
-                    "💱 链 {}: 在 {} 个交易对中发现 {} 个事件",
+                tracing::info!(
+                    "💱 链 {}: 在 {} 个交易对中发现 {} 个事件 (区块 {}-{})",
                     self.chain_id,
                     chunk.len(),
-                    logs.len()
+                    logs.len(),
+                    from_block,
+                    to_block
                 );
             }
 
             for (index, log) in logs.iter().enumerate() {
                 if let Err(e) = self.handle_pair_event(log.clone()).await {
-                    error!(
+                    tracing::error!(
                         "❌ 链 {}: 处理第 {} 个交易对事件失败: {}",
                         self.chain_id,
                         index + 1,
@@ -293,6 +396,28 @@ impl EventListener {
         }
 
         Ok(())
+    }
+
+    async fn get_token_info(
+        &self,
+        token_address: Address,
+    ) -> (Option<String>, Option<String>, Option<i32>) {
+        let contract = ERC20Fixed::new(token_address, Arc::clone(&self.provider));
+
+        let decimals = match contract.decimals().call().await {
+            Ok(d) => Some(d as i32),
+            Err(e) => {
+                error!(
+                    "Failed to get decimals for token {:?}: {}",
+                    token_address, e
+                );
+                None
+            }
+        };
+        let symbol = contract.symbol().call().await.ok();
+        let name = contract.name().call().await.ok();
+
+        (symbol, name, decimals)
     }
 
     async fn handle_pair_created_event(&self, log: Log) -> Result<()> {
@@ -318,18 +443,25 @@ impl EventListener {
         let timestamp =
             DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
 
+        // 从链上读取 token 信息
+        info!("🔍 链 {}: 读取 token 信息...", self.chain_id);
+        let (token0_symbol, token0_name, token0_decimals) =
+            self.get_token_info(event.token_0).await;
+        let (token1_symbol, token1_name, token1_decimals) =
+            self.get_token_info(event.token_1).await;
+
         let pair = TradingPair {
             id: Uuid::new_v4(),
             chain_id: self.chain_id as i32,
             address: format!("0x{:x}", event.pair),
             token0: format!("0x{:x}", event.token_0),
             token1: format!("0x{:x}", event.token_1),
-            token0_symbol: None,
-            token1_symbol: None,
-            token0_decimals: None,
-            token1_decimals: None,
-            token0_name: None,
-            token1_name: None,
+            token0_symbol,
+            token1_symbol,
+            token0_decimals,
+            token1_decimals,
+            token0_name,
+            token1_name,
             created_at: timestamp,
             block_number: log.block_number.unwrap().as_u64() as i64,
             transaction_hash: format!("0x{:x}", log.transaction_hash.unwrap()),
@@ -344,7 +476,133 @@ impl EventListener {
             "🎉 链 {}: 新交易对创建 - {} (区块: {})",
             self.chain_id, pair.address, pair.block_number
         );
-        info!("   Token0: {} | Token1: {}", pair.token0, pair.token1);
+        info!(
+            "   Token0: {} ({}) | Token1: {} ({})",
+            pair.token0,
+            pair.token0_symbol.as_deref().unwrap_or("Unknown"),
+            pair.token1,
+            pair.token1_symbol.as_deref().unwrap_or("Unknown")
+        );
+
+        // 处理同一块中的 Mint 事件
+        if let Err(e) = self
+            .handle_mint_events_for_pair(event.pair, block_number.as_u64(), timestamp)
+            .await
+        {
+            warn!(
+                "⚠️ 链 {}: 处理交易对 {} 的 Mint 事件失败: {}",
+                self.chain_id, pair.address, e
+            );
+        }
+
+        Ok(())
+    }
+
+    // 处理指定交易对在指定区块的 Mint 事件
+    async fn handle_mint_events_for_pair(
+        &self,
+        pair_address: Address,
+        block_number: u64,
+        timestamp: DateTime<Utc>,
+    ) -> Result<()> {
+        let filter = Filter::new()
+            .address(pair_address)
+            .from_block(BlockNumber::Number(block_number.into()))
+            .to_block(BlockNumber::Number(block_number.into()))
+            .event("Mint(address,uint256,uint256)");
+
+        let logs_opt = self.provider.get_logs(&filter).await.ok();
+        let logs = match logs_opt {
+            Some(logs) => {
+                // 打印 logs
+                tracing::debug!(
+                    "Found {} Mint event logs for pair 0x{:x} in block {}:",
+                    logs.len(),
+                    pair_address,
+                    block_number
+                );
+                for (index, log) in logs.iter().enumerate() {
+                    tracing::debug!(
+                        "Log {}: {{ address: 0x{:x}, topics: {:?}, data: 0x{} }}",
+                        index,
+                        log.address,
+                        log.topics,
+                        hex::encode(&log.data)
+                    );
+                }
+                logs
+            }
+            None => {
+                debug!(
+                    "链 {}: 交易对 {} 在区块 {} 中没有 Mint 事件",
+                    self.chain_id,
+                    format!("0x{:x}", pair_address),
+                    block_number
+                );
+                return Ok(());
+            }
+        };
+
+        if !logs.is_empty() {
+            info!(
+                "🌱 链 {}: 在区块 {} 中发现交易对 {} 的 {} 个 Mint 事件",
+                self.chain_id,
+                block_number,
+                format!("0x{:x}", pair_address),
+                logs.len()
+            );
+        }
+
+        for log in logs {
+            // 验证事件签名
+            let mint_event_signature = H256::from_slice(
+                &hex::decode("4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f")
+                    .unwrap_or_default(),
+            );
+            if log.topics.get(0) != Some(&mint_event_signature) {
+                tracing::debug!(
+                    "Skipping non-Mint event for pair 0x{:x} in block {}: topics[0]={:?}",
+                    pair_address,
+                    block_number,
+                    log.topics.get(0)
+                );
+                continue;
+            }
+
+            if let Err(e) = self.handle_mint_event(log, timestamp).await {
+                tracing::error!("❌ 链 {}: 处理 Mint 事件失败: {}", self.chain_id, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_mint_event(&self, log: Log, timestamp: DateTime<Utc>) -> Result<()> {
+        let event = MintFilter::decode_log(&RawLog {
+            topics: log.topics.clone(),
+            data: log.data.0.to_vec(),
+        })?;
+
+        let mint_event = MintEvent {
+            id: Uuid::new_v4(),
+            chain_id: self.chain_id as i32,
+            pair_address: format!("0x{:x}", log.address),
+            sender: format!("0x{:x}", event.sender),
+            amount0: Decimal::from(event.amount_0.as_u128()),
+            amount1: Decimal::from(event.amount_1.as_u128()),
+            block_number: log.block_number.unwrap().as_u64() as i64,
+            transaction_hash: format!("0x{:x}", log.transaction_hash.unwrap()),
+            log_index: log.log_index.unwrap().as_u32() as i32,
+            timestamp,
+        };
+
+        self.database.insert_mint_event(&mint_event).await?;
+        let _ = self.event_sender.send(serde_json::to_string(&mint_event)?);
+
+        info!(
+            "🌱 链 {}: Mint事件 - 交易对: {} (区块: {})",
+            self.chain_id, mint_event.pair_address, mint_event.block_number
+        );
 
         Ok(())
     }
@@ -375,6 +633,20 @@ impl EventListener {
             0xd7, 0x8a, 0xd9, 0x5f, 0xa4, 0x6c, 0x99, 0x4b, 0x6e, 0x6f, 0x0d, 0x4a, 0xaa, 0x7c,
             0xe5, 0xbd, 0x1e, 0xdd, 0x3e, 0x86, 0xef, 0x3e, 0x7e, 0x93, 0xb2, 0xa0, 0x8c, 0x5d,
             0x0e, 0x57, 0x9b, 0x9b,
+        ];
+
+        // Mint事件签名: keccak256("Mint(address,uint256,uint256)")
+        let mint_signature = [
+            0x4c, 0x20, 0x9b, 0x5f, 0xc8, 0xad, 0x50, 0x15, 0x8f, 0x35, 0x15, 0x5b, 0x2f, 0xd2,
+            0x6b, 0xb6, 0x42, 0x4a, 0x6f, 0xe0, 0x5e, 0x6a, 0x7e, 0x4b, 0x04, 0x2f, 0xeb, 0x5f,
+            0x0e, 0x64, 0xec, 0x39,
+        ];
+
+        // Burn事件签名: keccak256("Burn(address,uint256,uint256,address)")
+        let burn_signature = [
+            0xdc, 0xcd, 0x41, 0x2f, 0x0b, 0x12, 0x36, 0xf1, 0x9d, 0x88, 0xf8, 0xf6, 0x10, 0x8f,
+            0xda, 0x47, 0xb3, 0x0c, 0x1d, 0x31, 0x11, 0x4b, 0x5a, 0x6c, 0x92, 0x13, 0x49, 0x16,
+            0x72, 0xfb, 0x0a, 0x29,
         ];
 
         if event_signature.as_bytes() == swap_signature {
@@ -409,6 +681,37 @@ impl EventListener {
             debug!(
                 "💱 链 {}: Swap事件 - 交易对: {} (区块: {})",
                 self.chain_id, swap_event.pair_address, swap_event.block_number
+            );
+        } else if event_signature.as_bytes() == mint_signature {
+            self.handle_mint_event(log, timestamp).await?;
+        } else if event_signature.as_bytes() == burn_signature {
+            let sender = Address::from_slice(&log.topics[1][12..]);
+            let to = Address::from_slice(&log.topics[2][12..]);
+
+            let data = &log.data;
+            let amount0 = U256::from_big_endian(&data[0..32]);
+            let amount1 = U256::from_big_endian(&data[32..64]);
+
+            let burn_event = BurnEvent {
+                id: Uuid::new_v4(),
+                chain_id: self.chain_id as i32,
+                pair_address: format!("0x{:x}", pair_address),
+                sender: format!("0x{:x}", sender),
+                amount0: Decimal::from(amount0.as_u128()),
+                amount1: Decimal::from(amount1.as_u128()),
+                to_address: format!("0x{:x}", to),
+                block_number: log.block_number.unwrap().as_u64() as i64,
+                transaction_hash: format!("0x{:x}", log.transaction_hash.unwrap()),
+                log_index: log.log_index.unwrap().as_u32() as i32,
+                timestamp,
+            };
+
+            self.database.insert_burn_event(&burn_event).await?;
+            let _ = self.event_sender.send(serde_json::to_string(&burn_event)?);
+
+            debug!(
+                "🔥 链 {}: Burn事件 - 交易对: {} (区块: {})",
+                self.chain_id, burn_event.pair_address, burn_event.block_number
             );
         }
 

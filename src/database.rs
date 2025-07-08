@@ -2,7 +2,7 @@ use crate::models::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 pub struct Database {
@@ -191,6 +191,98 @@ impl Database {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_last_processed_blocks_chain_id ON last_processed_blocks(chain_id)")
             .execute(&self.pool)
             .await?;
+
+        Ok(())
+    }
+
+    // 辅助方法：安全获取行数据
+    fn safe_get_string(row: &PgRow, column: &str) -> String {
+        row.try_get::<String, _>(column)
+            .unwrap_or_else(|_| "".to_string())
+    }
+
+    fn safe_get_optional_string(row: &PgRow, column: &str) -> Option<String> {
+        row.try_get::<Option<String>, _>(column).ok().flatten()
+    }
+
+    fn safe_get_i32(row: &PgRow, column: &str) -> i32 {
+        row.try_get::<i32, _>(column).unwrap_or(0)
+    }
+
+    fn safe_get_i64(row: &PgRow, column: &str) -> i64 {
+        row.try_get::<i64, _>(column).unwrap_or(0)
+    }
+
+    fn safe_get_bigdecimal(row: &PgRow, column: &str) -> Decimal {
+        row.try_get::<Decimal, _>(column)
+            .unwrap_or_else(|_| Decimal::from(0))
+    }
+
+    fn safe_get_optional_bigdecimal(row: &PgRow, column: &str) -> Option<Decimal> {
+        row.try_get::<Option<Decimal>, _>(column).ok().flatten()
+    }
+
+    fn safe_get_datetime(row: &PgRow, column: &str) -> DateTime<Utc> {
+        row.try_get::<DateTime<Utc>, _>(column)
+            .unwrap_or_else(|_| Utc::now())
+    }
+
+    fn safe_get_bool(row: &PgRow, column: &str) -> bool {
+        row.try_get::<bool, _>(column).unwrap_or(false)
+    }
+
+    fn safe_get_uuid(row: &PgRow, column: &str) -> Uuid {
+        row.try_get::<Uuid, _>(column)
+            .unwrap_or_else(|_| Uuid::new_v4())
+    }
+
+    // 添加 insert_mint_event 方法
+    pub async fn insert_mint_event(&self, event: &MintEvent) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO mint_events 
+            (chain_id, pair_address, sender, amount0, amount1, block_number, transaction_hash, log_index, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (chain_id, transaction_hash, log_index) DO NOTHING
+            "#,
+        )
+        .bind(event.chain_id)
+        .bind(&event.pair_address)
+        .bind(&event.sender)
+        .bind(&event.amount0)
+        .bind(&event.amount1)
+        .bind(event.block_number)
+        .bind(&event.transaction_hash)
+        .bind(event.log_index)
+        .bind(event.timestamp)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    // 添加 insert_burn_event 方法
+    pub async fn insert_burn_event(&self, event: &BurnEvent) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO burn_events 
+            (chain_id, pair_address, sender, amount0, amount1, to_address, block_number, transaction_hash, log_index, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (chain_id, transaction_hash, log_index) DO NOTHING
+            "#,
+        )
+        .bind(event.chain_id)
+        .bind(&event.pair_address)
+        .bind(&event.sender)
+        .bind(&event.amount0)
+        .bind(&event.amount1)
+        .bind(&event.to_address)
+        .bind(event.block_number)
+        .bind(&event.transaction_hash)
+        .bind(event.log_index)
+        .bind(event.timestamp)
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

@@ -16,6 +16,7 @@ use ethers::{
     types::Address,
 };
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{info, Level};
@@ -39,11 +40,12 @@ async fn main() -> Result<()> {
     // Create event broadcast channel
     let (event_sender, _) = broadcast::channel(1000);
 
+    // 创建 providers 和 factory_addresses 映射
+    let mut providers = HashMap::new();
+    let mut factory_addresses = HashMap::new();
+
     // Start event listeners for each enabled chain
     for (chain_id, chain_config) in &config.chains {
-        let chain_id = *chain_id;
-        let chain_config = chain_config.clone();
-
         if !chain_config.enabled {
             info!(
                 "Chain {} ({}) is disabled, skipping",
@@ -60,19 +62,32 @@ async fn main() -> Result<()> {
         let provider = Arc::new(Provider::<Http>::try_from(&chain_config.rpc_url)?);
         let factory_address: Address = chain_config.factory_address.parse()?;
 
-        let mut event_listener = EventListener::new(
-            provider,
-            Arc::clone(&database),
-            chain_id,
-            factory_address,
-            event_sender.clone(),
-            chain_config.poll_interval,
-            chain_config.start_block,
-        );
+        // 保存到映射中，供API使用
+        providers.insert(*chain_id, Arc::clone(&provider));
+        factory_addresses.insert(*chain_id, factory_address);
+
+        // 👇 克隆必要字段，避免非 'static 引用
+        let chain_id_cloned = *chain_id;
+        let provider_cloned = Arc::clone(&provider);
+        let database_cloned = Arc::clone(&database);
+        let factory_address_cloned = factory_address;
+        let event_sender_cloned = event_sender.clone();
+        let poll_interval = chain_config.poll_interval;
+        let start_block = chain_config.start_block;
 
         tokio::spawn(async move {
+            let mut event_listener = EventListener::new(
+                provider_cloned,
+                database_cloned,
+                chain_id_cloned,
+                factory_address_cloned,
+                event_sender_cloned,
+                poll_interval,
+                start_block,
+            );
+
             if let Err(e) = event_listener.start_monitoring().await {
-                tracing::error!("Event listener error for chain {}: {}", chain_id, e);
+                tracing::error!("Event listener error for chain {}: {}", chain_id_cloned, e);
             }
         });
     }
@@ -81,6 +96,8 @@ async fn main() -> Result<()> {
     let api_state = ApiState {
         database: Arc::clone(&database),
         event_sender,
+        providers,
+        factory_addresses,
     };
 
     let app = create_router(api_state);
