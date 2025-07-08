@@ -2,3 +2,4 @@ config.toml
 /target
 /data
 /documents
+/doc
