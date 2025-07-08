@@ -1,4 +1,3 @@
-// This is now just a wrapper that calls the combined service
 use uniswap_monitor::{Config, services::{EventService, ApiService}};
 use anyhow::Result;
 use tracing::{info, Level};
@@ -11,11 +10,7 @@ async fn main() -> Result<()> {
         .with_max_level(Level::INFO)
         .init();
 
-    info!("🔧 启动UniswapV2监控服务 (默认组合模式)...");
-    info!("💡 提示: 可以使用以下命令分别启动服务:");
-    info!("   - 仅事件监听: cargo run --bin event-service");
-    info!("   - 仅API服务: cargo run --bin api-service");
-    info!("   - 组合服务: cargo run --bin combined-service");
+    info!("🔧 启动组合服务 (事件监听 + API)...");
 
     // Load configuration
     let config = Config::from_env()?;

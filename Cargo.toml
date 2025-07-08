@@ -25,3 +25,16 @@ hex = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+
+[[bin]]
+name = "event-service"
+path = "src/bin/event_service.rs"
+
+[[bin]]
+name = "api-service"
+path = "src/bin/api_service.rs"
+
+[[bin]]
+name = "combined-service"
+path = "src/bin/combined_service.rs"
