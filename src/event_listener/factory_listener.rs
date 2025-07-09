@@ -139,8 +139,12 @@ impl FactoryEventListener {
                     logs
                 }
                 Err(e) => {
-                    error!("❌ 链 {}: 获取工厂事件失败: {}", self.base.chain_id, e);
-                    return Err(e.into());
+                    if e.to_string().contains("null") {
+                        return Ok(());
+                    } else {
+                        error!("❌ 链 {}: 获取工厂事件失败: {}", self.base.chain_id, e);
+                        return Err(e.into());
+                    }
                 }
             };
 
@@ -161,17 +165,10 @@ impl FactoryEventListener {
                 }
             }
 
-            if failed > 0 {
-                warn!(
-                    "⚠️ 链 {}: 工厂事件处理完成 - 成功: {}, 失败: {}",
-                    self.base.chain_id, processed, failed
-                );
-            } else if processed > 0 {
-                info!(
-                    "✅ 链 {}: 工厂事件处理完成 - 成功处理 {} 个事件",
-                    self.base.chain_id, processed
-                );
-            }
+            info!(
+                "⛓️   📊  链 {}: 工厂事件处理总结 - 成功: {}, 失败: {}",
+                self.base.chain_id, processed, failed
+            );
 
             self.base.update_last_processed_block(to_block).await?;
         }

@@ -3,6 +3,10 @@ name = "uniswap-monitor"
 version = "0.1.0"
 edition = "2021"
 
+[lints.clippy]
+unused_variables = "allow"
+dead_code = "allow"
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 ethers = { version = "2.0", features = ["rustls"] }

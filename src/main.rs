@@ -1,6 +1,6 @@
 // This is now just a wrapper that calls the combined service
 #![allow(unused_variables)]  // 忽略未使用变量的警告
-#![allow(dead_code)]        // 忽略未使用代码的警告
+
 
 use anyhow::Result;
 use config::Config;
