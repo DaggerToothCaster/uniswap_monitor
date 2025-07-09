@@ -1,7 +1,7 @@
 use crate::database::Database;
 use anyhow::Result;
 use ethers::{
-    providers::{Http, Provider},
+    providers::{Http, Provider,Middleware},
     types::Address,
 };
 use std::sync::Arc;
@@ -89,6 +89,7 @@ impl BaseEventListener {
     }
 
     pub async fn get_current_block_range(&self, batch_size: u64) -> Result<Option<(u64, u64)>> {
+     
         let latest_block = self.provider.get_block_number().await?.as_u64();
 
         if latest_block <= self.last_processed_block {
