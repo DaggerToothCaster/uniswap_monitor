@@ -410,7 +410,7 @@ pub async fn get_processing_status(pool: &PgPool) -> Result<Vec<ProcessingStatus
     Ok(status)
 }
 
-// Kline data operations
+// 修复后的K线数据查询 - 正确处理价格计算逻辑
 pub async fn get_kline_data(
     pool: &PgPool,
     pair_address: &str,
@@ -418,75 +418,614 @@ pub async fn get_kline_data(
     interval: &str,
     limit: i32,
 ) -> Result<Vec<KlineData>> {
-    let interval_seconds = match interval {
-        "1m" => 60,
-        "5m" => 300,
-        "15m" => 900,
-        "1h" => 3600,
-        "4h" => 14400,
-        "1d" => 86400,
-        _ => 3600,
-    };
-
-    let query = r#"
-        WITH swap_data AS (
-            SELECT 
-                date_trunc('hour', timestamp - INTERVAL '0 seconds') + 
-                INTERVAL '1 hour' * FLOOR(EXTRACT(EPOCH FROM (timestamp - date_trunc('hour', timestamp))) / $4) as interval_start,
-                CASE 
-                    WHEN amount0_out > 0 AND amount0_out > 0 THEN amount1_in / amount0_out
-                    WHEN amount1_out > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                    ELSE 0
-                END as price,
-                (amount0_in + amount0_out + amount1_in + amount1_out) as volume,
-                timestamp,
-                ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp - INTERVAL '0 seconds') + 
-                    INTERVAL '1 hour' * FLOOR(EXTRACT(EPOCH FROM (timestamp - date_trunc('hour', timestamp))) / $4) 
-                    ORDER BY timestamp ASC) as rn_first,
-                ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp - INTERVAL '0 seconds') + 
-                    INTERVAL '1 hour' * FLOOR(EXTRACT(EPOCH FROM (timestamp - date_trunc('hour', timestamp))) / $4) 
-                    ORDER BY timestamp DESC) as rn_last
-            FROM swap_events 
-            WHERE pair_address = $1 AND chain_id = $2
-            AND timestamp >= NOW() - INTERVAL '7 days'
-            AND (amount0_out > 0 OR amount1_out > 0)
-            AND (
-                (amount0_out > 0 AND amount0_out > 0) OR 
-                (amount1_out > 0 AND amount1_out > 0)
+    // 根据不同的时间区间使用不同的查询
+    let (query, _interval_param) = match interval {
+        "1m" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('minute', timestamp) as time_bucket,
+                    -- 修复价格计算逻辑：统一表示为token1相对于token0的价格
+                    CASE 
+                        -- 用token0换token1: amount0_in > 0, amount1_out > 0
+                        -- 价格 = amount0_in / amount1_out (多少token0换1个token1)
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        -- 用token1换token0: amount1_in > 0, amount0_out > 0  
+                        -- 价格 = amount0_out / amount1_in (1个token1换多少token0，需要取倒数)
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    -- 成交量计算：使用输入的token数量作为成交量
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '1 day'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
             )
-        ),
-        kline_data AS (
             SELECT 
-                interval_start,
-                MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
-                MAX(price) as high_price,
-                MIN(price) as low_price,
-                MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                SUM(volume) as total_volume,
-                COUNT(*) as trade_count
-            FROM swap_data
-            WHERE price > 0
-            GROUP BY interval_start
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "1 day"
+        ),
+        "5m" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '3 days'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "3 days"
+        ),
+        "15m" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '7 days'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "7 days"
+        ),
+        "30m" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '14 days'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "14 days"
+        ),
+        "1h" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('hour', timestamp) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '30 days'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "30 days"
+        ),
+        "4h" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '90 days'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "90 days"
+        ),
+        "1d" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('day', timestamp) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('day', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('day', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '1 year'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "1 year"
+        ),
+        "1w" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('week', timestamp) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('week', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('week', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '2 years'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "2 years"
+        ),
+        "1M" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('month', timestamp) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('month', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('month', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '5 years'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "5 years"
+        ),
+        "1y" => (
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('year', timestamp) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('year', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('year', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "all time"
+        ),
+        _ => (
+            // 默认使用1小时
+            r#"
+            WITH time_series AS (
+                SELECT 
+                    date_trunc('hour', timestamp) as time_bucket,
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END as price,
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END as volume,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp ASC) as rn_first,
+                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp DESC) as rn_last
+                FROM swap_events 
+                WHERE pair_address = $1 AND chain_id = $2
+                AND timestamp >= NOW() - INTERVAL '30 days'
+                AND (
+                    (amount0_in > 0 AND amount1_out > 0) OR 
+                    (amount1_in > 0 AND amount0_out > 0)
+                )
+            ),
+            kline_aggregated AS (
+                SELECT 
+                    time_bucket,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(price) as high_price,
+                    MIN(price) as low_price,
+                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                    SUM(volume) as total_volume,
+                    COUNT(*) as trade_count
+                FROM time_series
+                WHERE price > 0
+                GROUP BY time_bucket
+            )
+            SELECT 
+                time_bucket as timestamp,
+                COALESCE(open_price, 0) as open,
+                COALESCE(high_price, 0) as high,
+                COALESCE(low_price, 0) as low,
+                COALESCE(close_price, 0) as close,
+                COALESCE(total_volume, 0) as volume,
+                COALESCE(trade_count, 0) as trade_count
+            FROM kline_aggregated
+            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            ORDER BY time_bucket DESC
+            LIMIT $3
+            "#,
+            "30 days"
         )
-        SELECT 
-            interval_start as timestamp,
-            COALESCE(open_price, 0) as open,
-            COALESCE(high_price, 0) as high,
-            COALESCE(low_price, 0) as low,
-            COALESCE(close_price, 0) as close,
-            COALESCE(total_volume, 0) as volume,
-            COALESCE(trade_count, 0) as trade_count
-        FROM kline_data
-        WHERE open_price IS NOT NULL AND close_price IS NOT NULL
-        ORDER BY interval_start DESC
-        LIMIT $3
-    "#;
+    };
 
     let rows = sqlx::query(query)
         .bind(pair_address)
         .bind(chain_id)
         .bind(limit)
-        .bind(interval_seconds)
         .fetch_all(pool)
         .await?;
 
@@ -506,7 +1045,63 @@ pub async fn get_kline_data(
     Ok(klines)
 }
 
-// Trade records operations
+// 修复后的分时图数据查询 - 同样修复价格计算逻辑
+pub async fn get_timeseries_data(
+    pool: &PgPool,
+    pair_address: &str,
+    chain_id: i32,
+    hours: i32,
+) -> Result<Vec<TimeSeriesData>> {
+    let query = r#"
+        SELECT 
+            timestamp,
+            CASE 
+                WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                ELSE 0
+            END as price,
+            CASE 
+                WHEN amount0_in > 0 THEN amount0_in
+                WHEN amount1_in > 0 THEN amount1_in  
+                ELSE 0
+            END as volume
+        FROM swap_events 
+        WHERE pair_address = $1 AND chain_id = $2
+        AND timestamp >= NOW() - INTERVAL '1 hour' * $3
+        AND (
+            (amount0_in > 0 AND amount1_out > 0) OR 
+            (amount1_in > 0 AND amount0_out > 0)
+        )
+        AND (
+            CASE 
+                WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                ELSE 0
+            END
+        ) > 0
+        ORDER BY timestamp ASC
+    "#;
+
+    let rows = sqlx::query(query)
+        .bind(pair_address)
+        .bind(chain_id)
+        .bind(hours)
+        .fetch_all(pool)
+        .await?;
+
+    let mut timeseries = Vec::new();
+    for row in rows {
+        timeseries.push(TimeSeriesData {
+            timestamp: safe_get_datetime(&row, "timestamp"),
+            price: safe_get_decimal(&row, "price"),
+            volume: safe_get_decimal(&row, "volume"),
+        });
+    }
+
+    Ok(timeseries)
+}
+
+// 修复后的交易记录查询 - 同样修复价格计算逻辑
 pub async fn get_pair_trades(
     pool: &PgPool,
     pair_address: &str,
@@ -529,13 +1124,13 @@ pub async fn get_pair_trades(
             se.amount0_out,
             se.amount1_out,
             CASE 
-                WHEN se.amount0_out > 0 AND se.amount0_out > 0 THEN se.amount1_in / se.amount0_out
-                WHEN se.amount1_out > 0 AND se.amount1_out > 0 THEN se.amount0_in / se.amount1_out
+                WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN se.amount0_in / se.amount1_out
+                WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN se.amount0_out / se.amount1_in
                 ELSE 0
             END as price,
             CASE 
-                WHEN se.amount0_out > 0 THEN 'sell'
-                WHEN se.amount1_out > 0 THEN 'buy'
+                WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 'buy'  -- 用token0买token1
+                WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 'sell' -- 用token1买token0
                 ELSE 'unknown'
             END as trade_type,
             se.block_number,

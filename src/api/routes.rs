@@ -10,6 +10,7 @@ pub fn create_router(state: ApiState) -> Router {
         // Trading pairs routes
         .route("/api/pairs", get(handlers::get_pairs))
         .route("/api/pairs/:chain_id/:address/kline", get(handlers::get_kline))
+        .route("/api/pairs/:chain_id/:address/timeseries", get(handlers::get_timeseries))  // 新增分时图接口
         .route("/api/pairs/:chain_id/:address/trades", get(handlers::get_pair_trades))
         .route("/api/pairs/:chain_id/:address/liquidity", get(handlers::get_pair_liquidity))
         

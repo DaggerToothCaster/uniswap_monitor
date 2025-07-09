@@ -14,6 +14,11 @@ pub struct KlineQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TimeSeriesQuery {
+    pub hours: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TokenListQuery {
     pub chain_id: Option<i32>,
     pub limit: Option<i32>,
@@ -69,10 +74,36 @@ pub async fn get_kline(
     let interval = params.interval.unwrap_or_else(|| "1h".to_string());
     let limit = params.limit.unwrap_or(100);
 
+    // 验证时间区间参数
+    if !is_valid_interval(&interval) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     match crate::database::operations::get_kline_data(state.database.pool(), &address, chain_id, &interval, limit).await {
         Ok(klines) => Ok(Json(klines)),
         Err(e) => {
             tracing::error!("Failed to get kline data: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+pub async fn get_timeseries(
+    Path((chain_id, address)): Path<(i32, String)>,
+    Query(params): Query<TimeSeriesQuery>,
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<TimeSeriesData>>, StatusCode> {
+    let hours = params.hours.unwrap_or(24);
+
+    // 限制查询范围
+    if hours > 168 { // 最多7天
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    match crate::database::operations::get_timeseries_data(state.database.pool(), &address, chain_id, hours).await {
+        Ok(timeseries) => Ok(Json(timeseries)),
+        Err(e) => {
+            tracing::error!("Failed to get timeseries data: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -219,4 +250,9 @@ pub async fn get_detailed_processing_status(
         Ok(blocks) => Ok(Json(blocks)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+// 辅助函数：验证时间区间参数
+fn is_valid_interval(interval: &str) -> bool {
+    matches!(interval, "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "1w" | "1M" | "1y")
 }
