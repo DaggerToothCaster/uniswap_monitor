@@ -1,3 +1,5 @@
+#![allow(unused_variables)]  // 忽略未使用变量的警告
+#![allow(dead_code)]        // 忽略未使用代码的警告
 use crate::services::{ApiService, EventService};
 use anyhow::Result;
 use config::Config;
