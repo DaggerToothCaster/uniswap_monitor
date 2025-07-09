@@ -23,8 +23,7 @@ pub struct ChainConfig {
     pub start_block: u64,
     pub poll_interval: u64,
     pub enabled: bool,
-    pub factory_block_batch_size: u64,
-    pub pair_block_batch_size: u64,
+    pub block_batch_size: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -35,8 +34,7 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DefaultConfig {
-    pub factory_block_batch_size: u64,
-    pub pair_block_batch_size: u64,
+    pub block_batch_size: u64,
 }
 
 impl Config {
@@ -56,11 +54,8 @@ impl Config {
         }
 
         let defaults = DefaultConfig {
-            factory_block_batch_size: std::env::var("DEFAULT_FACTORY_BLOCK_BATCH_SIZE")
+            block_batch_size: std::env::var("DEFAULT_BLOCK_BATCH_SIZE")
                 .unwrap_or_else(|_| "1000".to_string())
-                .parse()?,
-            pair_block_batch_size: std::env::var("DEFAULT_PAIR_BLOCK_BATCH_SIZE")
-                .unwrap_or_else(|_| "100".to_string())
                 .parse()?,
         };
 
@@ -86,11 +81,8 @@ impl Config {
                     enabled: std::env::var("NOS_ENABLED")
                         .unwrap_or_else(|_| "false".to_string())
                         .parse()?,
-                    factory_block_batch_size: std::env::var("NOS_FACTORY_BLOCK_BATCH_SIZE")
-                        .unwrap_or_else(|_| defaults.factory_block_batch_size.to_string())
-                        .parse()?,
-                    pair_block_batch_size: std::env::var("NOS_PAIR_BLOCK_BATCH_SIZE")
-                        .unwrap_or_else(|_| defaults.pair_block_batch_size.to_string())
+                    block_batch_size: std::env::var("NOS_BLOCK_BATCH_SIZE")
+                        .unwrap_or_else(|_| defaults.block_batch_size.to_string())
                         .parse()?,
                 },
             );
@@ -138,16 +130,14 @@ impl Config {
         println!("ETH_START_BLOCK=10000835");
         println!("ETH_POLL_INTERVAL=12");
         println!("ETH_ENABLED=true");
-        println!("ETH_FACTORY_BLOCK_BATCH_SIZE=1000");
-        println!("ETH_PAIR_BLOCK_BATCH_SIZE=100\n");
+        println!("ETH_BLOCK_BATCH_SIZ=1000\n");
 
         println!("# 服务器配置");
         println!("SERVER_HOST=0.0.0.0");
         println!("SERVER_PORT=3000\n");
 
         println!("# 全局默认配置");
-        println!("DEFAULT_FACTORY_BLOCK_BATCH_SIZE=1000");
-        println!("DEFAULT_PAIR_BLOCK_BATCH_SIZE=100\n");
+        println!("DEFAULT_BLOCK_BATCH_SIZE=1000\n");
 
         println!("{}", "=".repeat(80));
     }

@@ -1,7 +1,7 @@
 use crate::database::Database;
 use anyhow::Result;
 use ethers::{
-    providers::{Http, Provider,Middleware},
+    providers::{Http, Middleware, Provider},
     types::Address,
 };
 use std::sync::Arc;
@@ -16,8 +16,7 @@ pub struct BaseEventListener {
     pub poll_interval: Duration,
     pub last_processed_block: u64,
     pub start_block: u64,
-    pub factory_block_batch_size: u64,
-    pub pair_block_batch_size: u64,
+    pub block_batch_size: u64, // 统一的区块批次大小
 }
 
 impl BaseEventListener {
@@ -28,8 +27,7 @@ impl BaseEventListener {
         event_sender: broadcast::Sender<String>,
         poll_interval: u64,
         start_block: u64,
-        factory_block_batch_size: u64,
-        pair_block_batch_size: u64,
+        block_batch_size: u64,
     ) -> Self {
         Self {
             provider,
@@ -39,8 +37,7 @@ impl BaseEventListener {
             poll_interval: Duration::from_secs(poll_interval),
             last_processed_block: 0,
             start_block,
-            factory_block_batch_size,
-            pair_block_batch_size,
+            block_batch_size,
         }
     }
 
@@ -88,8 +85,8 @@ impl BaseEventListener {
         .await
     }
 
-    pub async fn get_current_block_range(&self, batch_size: u64) -> Result<Option<(u64, u64)>> {
-     
+    // 其他方法保持不变，但使用统一的 block_batch_size
+    pub async fn get_current_block_range(&self) -> Result<Option<(u64, u64)>> {
         let latest_block = self.provider.get_block_number().await?.as_u64();
 
         if latest_block <= self.last_processed_block {
@@ -97,7 +94,7 @@ impl BaseEventListener {
         }
 
         let from_block = self.last_processed_block + 1;
-        let to_block = std::cmp::min(from_block + batch_size - 1, latest_block);
+        let to_block = std::cmp::min(from_block + self.block_batch_size - 1, latest_block);
 
         Ok(Some((from_block, to_block)))
     }

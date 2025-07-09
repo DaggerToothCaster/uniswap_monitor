@@ -26,7 +26,6 @@ abigen!(
 
 pub struct SwapEventListener {
     base: BaseEventListener,
-    pair_block_batch_size: u64,
 }
 
 impl SwapEventListener {
@@ -37,7 +36,7 @@ impl SwapEventListener {
         event_sender: broadcast::Sender<String>,
         poll_interval: u64,
         start_block: u64,
-        pair_block_batch_size: u64,
+        block_batch_size: u64,
     ) -> Self {
         Self {
             base: BaseEventListener::new(
@@ -47,18 +46,16 @@ impl SwapEventListener {
                 event_sender,
                 poll_interval,
                 start_block,
-                0, //factory_block_batch_size
-                pair_block_batch_size,
+                block_batch_size,
             ),
-            pair_block_batch_size,
         }
     }
 
     pub async fn start_monitoring(&mut self) -> Result<()> {
         info!("🚀 启动链 {} 的交换事件监控服务...", self.base.chain_id);
-        info!("📊 交易对批次大小: {}", self.pair_block_batch_size);
+        info!("📊 区块批次大小: {}", self.base.block_batch_size);
 
-        // Use the same last processed block as factory listener
+        // 使用与工厂监听器相同的区块跟踪
         self.base.last_processed_block = crate::database::operations::get_last_processed_block(
             self.base.database.pool(),
             self.base.chain_id as i32,
@@ -76,19 +73,15 @@ impl SwapEventListener {
     }
 
     async fn poll_pair_events(&mut self) -> Result<()> {
-        // Get current last processed block (might be updated by factory listener)
+        // 获取当前最后处理的区块（可能被工厂监听器更新）
         self.base.last_processed_block = crate::database::operations::get_last_processed_block(
             self.base.database.pool(),
             self.base.chain_id as i32,
         )
         .await?;
 
-        if let Some((from_block, to_block)) = self
-            .base
-            .get_current_block_range(self.pair_block_batch_size)
-            .await?
-        {
-            // Load existing pairs
+        if let Some((from_block, to_block)) = self.base.get_current_block_range().await? {
+            // 加载现有交易对
             let pairs = crate::database::operations::get_all_pairs(
                 self.base.database.pool(),
                 Some(self.base.chain_id as i32),
@@ -111,6 +104,8 @@ impl SwapEventListener {
 
             if pair_addresses.is_empty() {
                 debug!("📭 链 {}: 没有交易对需要监控", self.base.chain_id);
+                // 即使没有交易对，也要更新区块进度，保持与工厂监听器同步
+                self.base.update_last_processed_block(to_block).await?;
                 return Ok(());
             }
 
@@ -126,7 +121,7 @@ impl SwapEventListener {
             let mut failed_pairs = 0;
             let mut successful_pairs = 0;
 
-            // Process each pair individually to avoid RPC limitations
+            // 逐个处理交易对以避免RPC限制
             for (index, &pair_address) in pair_addresses.iter().enumerate() {
                 if let Err(e) = self
                     .process_pair_events(pair_address, from_block, to_block)
@@ -134,6 +129,10 @@ impl SwapEventListener {
                 {
                     // 检查是否为 null 响应或类似错误
                     if e.to_string().contains("null") {
+                        debug!(
+                            "📭 链 {}: 交易对 0x{:x} 返回空响应",
+                            self.base.chain_id, pair_address
+                        );
                     } else {
                         error!(
                             "❌ 链 {}: 处理交易对 0x{:x} 事件失败: {}",
@@ -145,7 +144,7 @@ impl SwapEventListener {
                     successful_pairs += 1;
                 }
 
-                // Add small delay to avoid overwhelming RPC
+                // 添加小延迟避免RPC过载
                 if index < pair_addresses.len() - 1 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
@@ -155,36 +154,29 @@ impl SwapEventListener {
                 "⛓️   📊  链 {}: 交易对事件处理总结 - 成功: {}, 失败: {}",
                 self.base.chain_id, successful_pairs, failed_pairs
             );
+
+            // 重要：无论是否有事件，都要更新区块进度，保持与工厂监听器同步
+            self.base.update_last_processed_block(to_block).await?;
         }
 
         Ok(())
     }
 
-    async fn process_pair_events(
-        &self,
-        pair_address: Address,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<()> {
+    async fn process_pair_events(&self, pair_address: Address, from_block: u64, to_block: u64) -> Result<()> {
         let filter = Filter::new()
             .address(pair_address)
             .from_block(BlockNumber::Number(from_block.into()))
             .to_block(BlockNumber::Number(to_block.into()));
 
-        // 打印 filter 的 Debug 信息
-        debug!("Filter 内容: {:?}", filter);
+        let logs = self.base.provider.get_logs(&filter).await?;
 
-        if filter.topics.is_empty() {
+        if logs.is_empty() {
             return Ok(());
         }
 
-        let logs = self.base.provider.get_logs(&filter).await?;
-
         debug!(
             "💱 链 {}: 交易对 0x{:x} 获得 {} 个事件",
-            self.base.chain_id,
-            pair_address,
-            logs.len()
+            self.base.chain_id, pair_address, logs.len()
         );
 
         for log in logs {
@@ -202,8 +194,7 @@ impl SwapEventListener {
     async fn handle_pair_event(&self, log: Log) -> Result<()> {
         let block_number = log.block_number.unwrap();
         let block_number_hex = format!("0x{:x}", block_number);
-        let raw_block: serde_json::Value = self
-            .base
+        let raw_block: serde_json::Value = self.base
             .provider
             .request(
                 "eth_getBlockByNumber",
@@ -221,9 +212,7 @@ impl SwapEventListener {
         let pair_address = log.address;
         let event_signature = &log.topics[0];
 
-        let swap_signature = H256::from(keccak256(
-            "Swap(address,uint256,uint256,uint256,uint256,address)",
-        ));
+        let swap_signature = H256::from(keccak256("Swap(address,uint256,uint256,uint256,uint256,address)"));
         let mint_signature = H256::from(keccak256("Mint(address,uint256,uint256)"));
         let burn_signature = H256::from(keccak256("Burn(address,uint256,uint256,address)"));
 
@@ -267,15 +256,8 @@ impl SwapEventListener {
                     timestamp,
                 };
 
-                crate::database::operations::insert_swap_event(
-                    self.base.database.pool(),
-                    &swap_event,
-                )
-                .await?;
-                let _ = self
-                    .base
-                    .event_sender
-                    .send(serde_json::to_string(&swap_event)?);
+                crate::database::operations::insert_swap_event(self.base.database.pool(), &swap_event).await?;
+                let _ = self.base.event_sender.send(serde_json::to_string(&swap_event)?);
 
                 debug!(
                     "💱 链 {}: Swap事件已保存 - 交易对: {} (区块: {})",
@@ -302,15 +284,8 @@ impl SwapEventListener {
                             timestamp,
                         };
 
-                        crate::database::operations::insert_swap_event(
-                            self.base.database.pool(),
-                            &swap_event,
-                        )
-                        .await?;
-                        let _ = self
-                            .base
-                            .event_sender
-                            .send(serde_json::to_string(&swap_event)?);
+                        crate::database::operations::insert_swap_event(self.base.database.pool(), &swap_event).await?;
+                        let _ = self.base.event_sender.send(serde_json::to_string(&swap_event)?);
 
                         debug!(
                             "💱 链 {}: Swap事件已保存(手动解析) - 交易对: {} (区块: {})",
@@ -318,7 +293,10 @@ impl SwapEventListener {
                         );
                     }
                     Err(_) => {
-                        warn!("⚠️ 链 {}: Swap事件解析失败: {}", self.base.chain_id, e);
+                        warn!(
+                            "⚠️ 链 {}: Swap事件解析失败: {}",
+                            self.base.chain_id, e
+                        );
                     }
                 }
             }
@@ -346,12 +324,8 @@ impl SwapEventListener {
             timestamp,
         };
 
-        crate::database::operations::insert_mint_event(self.base.database.pool(), &mint_event)
-            .await?;
-        let _ = self
-            .base
-            .event_sender
-            .send(serde_json::to_string(&mint_event)?);
+        crate::database::operations::insert_mint_event(self.base.database.pool(), &mint_event).await?;
+        let _ = self.base.event_sender.send(serde_json::to_string(&mint_event)?);
 
         debug!(
             "🌱 链 {}: Mint事件已保存 - 交易对: {} (区块: {})",
@@ -381,12 +355,8 @@ impl SwapEventListener {
             timestamp,
         };
 
-        crate::database::operations::insert_burn_event(self.base.database.pool(), &burn_event)
-            .await?;
-        let _ = self
-            .base
-            .event_sender
-            .send(serde_json::to_string(&burn_event)?);
+        crate::database::operations::insert_burn_event(self.base.database.pool(), &burn_event).await?;
+        let _ = self.base.event_sender.send(serde_json::to_string(&burn_event)?);
 
         debug!(
             "🔥 链 {}: Burn事件已保存 - 交易对: {} (区块: {})",
@@ -396,10 +366,7 @@ impl SwapEventListener {
         Ok(())
     }
 
-    fn parse_swap_event_manually(
-        &self,
-        log: &Log,
-    ) -> Result<(Address, U256, U256, U256, U256, Address)> {
+    fn parse_swap_event_manually(&self, log: &Log) -> Result<(Address, U256, U256, U256, U256, Address)> {
         if log.topics.len() < 3 {
             return Err(anyhow::anyhow!("Swap 事件 topics 数量不足"));
         }

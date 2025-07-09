@@ -1,21 +1,17 @@
-pub mod base_listener;
 pub mod factory_listener;
 pub mod swap_listener;
+pub mod base_listener;
 
-pub use base_listener::BaseEventListener;
 pub use factory_listener::FactoryEventListener;
 pub use swap_listener::SwapEventListener;
+pub use base_listener::BaseEventListener;
 
 use crate::config::ChainConfig;
 use crate::database::Database;
 use anyhow::Result;
-use ethers::{
-    providers::{Http, Provider},
-    types::Address,
-};
+use ethers::{providers::{Provider, Http}, types::Address};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-
 #[derive(Clone)]
 pub struct EventListenerManager {
     database: Arc<Database>,
@@ -43,8 +39,7 @@ impl EventListenerManager {
             self.event_sender.clone(),
             config.poll_interval,
             config.start_block,
-            config.factory_block_batch_size,
-            config.pair_block_batch_size,
+            config.block_batch_size,  // 使用统一的批次大小
         );
 
         let factory_handle = tokio::spawn(async move {
@@ -61,7 +56,7 @@ impl EventListenerManager {
             self.event_sender.clone(),
             config.poll_interval,
             config.start_block,
-            config.pair_block_batch_size,
+            config.block_batch_size,  // 使用统一的批次大小
         );
 
         let swap_handle = tokio::spawn(async move {
