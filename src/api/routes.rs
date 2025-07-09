@@ -30,8 +30,9 @@ pub fn create_router(state: ApiState) -> Router {
                .delete(handlers::delete_token_metadata))
         .route("/api/metadata/tokens/:chain_id/:address/detail", get(handlers::get_token_detail))
         
-        // Status routes
-        .route("/api/status/blocks", get(handlers::get_processing_status))
+        // Status routes - 修改和新增
+        .route("/api/status/blocks", get(handlers::get_processing_status))  // 返回处理状态视图
+        .route("/api/status/blocks/detailed", get(handlers::get_detailed_processing_status))  // 返回详细记录
         
         // WebSocket
         .route("/api/ws", get(websocket::websocket_handler))

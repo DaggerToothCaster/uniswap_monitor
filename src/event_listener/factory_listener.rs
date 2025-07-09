@@ -1,5 +1,6 @@
 use super::base_listener::BaseEventListener;
 use crate::types::*;
+use crate::database::operations::EVENT_TYPE_FACTORY;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ethers::{
@@ -55,6 +56,7 @@ impl FactoryEventListener {
                 poll_interval,
                 start_block,
                 block_batch_size,
+                EVENT_TYPE_FACTORY.to_string(),  // 使用工厂事件类型
             ),
             factory_address,
         }
@@ -67,14 +69,14 @@ impl FactoryEventListener {
         self.base.initialize_last_processed_block().await?;
 
         let latest_block = self.base.provider.get_block_number().await?.as_u64();
-        info!("🔗 链 {}: 当前最新区块: {}", self.base.chain_id, latest_block);
+        info!("🔗 链 {} (工厂): 当前最新区块: {}", self.base.chain_id, latest_block);
 
         if self.base.last_processed_block >= latest_block {
-            info!("✅ 链 {}: 已处理到最新区块，等待新区块...", self.base.chain_id);
+            info!("✅ 链 {} (工厂): 已处理到最新区块，等待新区块...", self.base.chain_id);
         } else {
             let blocks_behind = latest_block - self.base.last_processed_block;
             info!(
-                "⏳ 链 {}: 需要处理 {} 个区块 (从 {} 到 {})",
+                "⏳ 链 {} (工厂): 需要处理 {} 个区块 (从 {} 到 {})",
                 self.base.chain_id,
                 blocks_behind,
                 self.base.last_processed_block + 1,
@@ -84,7 +86,7 @@ impl FactoryEventListener {
 
         loop {
             if let Err(e) = self.poll_factory_events().await {
-                error!("❌ 链 {}: 轮询工厂事件时出错: {}", self.base.chain_id, e);
+                error!("❌ 链 {} (工厂): 轮询工厂事件时出错: {}", self.base.chain_id, e);
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
 
@@ -95,7 +97,7 @@ impl FactoryEventListener {
     async fn poll_factory_events(&mut self) -> Result<()> {
         if let Some((from_block, to_block)) = self.base.get_current_block_range().await? {
             info!(
-                "🏭 链 {}: 处理工厂事件 - 区块: {}-{} (共 {} 个区块)",
+                "🏭 链 {} (工厂): 处理工厂事件 - 区块: {}-{} (共 {} 个区块)",
                 self.base.chain_id,
                 from_block,
                 to_block,
@@ -111,7 +113,7 @@ impl FactoryEventListener {
             let logs = match self.base.provider.get_logs(&filter).await {
                 Ok(logs) => {
                     debug!(
-                        "🔍 链 {}: 区块 {}-{} 获取到 {} 个工厂事件",
+                        "🔍 链 {} (工厂): 区块 {}-{} 获取到 {} 个工厂事件",
                         self.base.chain_id,
                         from_block,
                         to_block,
@@ -122,13 +124,13 @@ impl FactoryEventListener {
                 Err(e) => {
                     if e.to_string().to_lowercase().contains("null") {
                         debug!(
-                            "📭 链 {}: 区块 {}-{} 返回空日志，视为无事件",
+                            "📭 链 {} (工厂): 区块 {}-{} 返回空日志，视为无事件",
                             self.base.chain_id, from_block, to_block
                         );
                         self.base.update_last_processed_block(to_block).await?;
                         return Ok(());
                     } else {
-                        error!("❌ 链 {}: 获取工厂事件失败: {}", self.base.chain_id, e);
+                        error!("❌ 链 {} (工厂): 获取工厂事件失败: {}", self.base.chain_id, e);
                         return Err(e.into());
                     }
                 }
@@ -137,7 +139,7 @@ impl FactoryEventListener {
             // 如果日志为空，直接更新区块并返回
             if logs.is_empty() {
                 debug!(
-                    "📭 链 {}: 区块 {}-{} 中没有发现工厂事件",
+                    "📭 链 {} (工厂): 区块 {}-{} 中没有发现工厂事件",
                     self.base.chain_id, from_block, to_block
                 );
                 self.base.update_last_processed_block(to_block).await?;
@@ -146,7 +148,7 @@ impl FactoryEventListener {
 
             // 处理有效日志
             info!(
-                "🏭 链 {}: 发现 {} 个新交易对创建事件",
+                "🏭 链 {} (工厂): 发现 {} 个新交易对创建事件",
                 self.base.chain_id,
                 logs.len()
             );
@@ -157,7 +159,7 @@ impl FactoryEventListener {
             for (index, log) in logs.iter().enumerate() {
                 if let Err(e) = self.handle_pair_created_event(log.clone()).await {
                     error!(
-                        "❌ 链 {}: 处理第 {} 个PairCreated事件失败: {}",
+                        "❌ 链 {} (工厂): 处理第 {} 个PairCreated事件失败: {}",
                         self.base.chain_id,
                         index + 1,
                         e
@@ -169,7 +171,7 @@ impl FactoryEventListener {
             }
 
             info!(
-                "⛓️  📊  链 {}: 工厂事件处理总结 - 成功: {}, 失败: {}",
+                "📊 链 {} (工厂): 工厂事件处理总结 - 成功: {}, 失败: {}",
                 self.base.chain_id, processed, failed
             );
 
@@ -203,7 +205,7 @@ impl FactoryEventListener {
         let timestamp =
             DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
 
-        info!("🔍 链 {}: 读取 token 信息...", self.base.chain_id);
+        info!("🔍 链 {} (工厂): 读取 token 信息...", self.base.chain_id);
         let (token0_symbol, token0_name, token0_decimals) = self.get_token_info(event.token_0).await;
         let (token1_symbol, token1_name, token1_decimals) = self.get_token_info(event.token_1).await;
 
@@ -229,7 +231,7 @@ impl FactoryEventListener {
         let _ = self.base.event_sender.send(serde_json::to_string(&pair)?);
 
         info!(
-            "🎉 链 {}: 新交易对创建 - {} (区块: {})",
+            "🎉 链 {} (工厂): 新交易对创建 - {} (区块: {})",
             self.base.chain_id, pair.address, pair.block_number
         );
         info!(

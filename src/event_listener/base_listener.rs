@@ -16,7 +16,8 @@ pub struct BaseEventListener {
     pub poll_interval: Duration,
     pub last_processed_block: u64,
     pub start_block: u64,
-    pub block_batch_size: u64, // 统一的区块批次大小
+    pub block_batch_size: u64,
+    pub event_type: String,  // 新增：事件类型标识
 }
 
 impl BaseEventListener {
@@ -28,6 +29,7 @@ impl BaseEventListener {
         poll_interval: u64,
         start_block: u64,
         block_batch_size: u64,
+        event_type: String,  // 新增参数
     ) -> Self {
         Self {
             provider,
@@ -38,6 +40,7 @@ impl BaseEventListener {
             last_processed_block: 0,
             start_block,
             block_batch_size,
+            event_type,
         }
     }
 
@@ -46,6 +49,7 @@ impl BaseEventListener {
         crate::database::operations::initialize_last_processed_block(
             self.database.pool(),
             self.chain_id as i32,
+            &self.event_type,
             self.start_block,
         )
         .await?;
@@ -54,21 +58,20 @@ impl BaseEventListener {
         self.last_processed_block = crate::database::operations::get_last_processed_block(
             self.database.pool(),
             self.chain_id as i32,
+            &self.event_type,
         )
         .await?;
 
         if self.last_processed_block == 0 {
             self.last_processed_block = self.start_block;
             tracing::info!(
-                "📍 链 {}: 使用配置的起始区块: {}",
-                self.chain_id,
-                self.start_block
+                "📍 链 {} ({}): 使用配置的起始区块: {}",
+                self.chain_id, self.event_type, self.start_block
             );
         } else {
             tracing::info!(
-                "📍 链 {}: 从数据库恢复，上次处理到区块: {}",
-                self.chain_id,
-                self.last_processed_block
+                "📍 链 {} ({}): 从数据库恢复，上次处理到区块: {}",
+                self.chain_id, self.event_type, self.last_processed_block
             );
         }
 
@@ -80,12 +83,12 @@ impl BaseEventListener {
         crate::database::operations::update_last_processed_block(
             self.database.pool(),
             self.chain_id as i32,
+            &self.event_type,
             block_number,
         )
         .await
     }
 
-    // 其他方法保持不变，但使用统一的 block_batch_size
     pub async fn get_current_block_range(&self) -> Result<Option<(u64, u64)>> {
         let latest_block = self.provider.get_block_number().await?.as_u64();
 

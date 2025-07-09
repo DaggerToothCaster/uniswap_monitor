@@ -201,8 +201,18 @@ pub async fn get_token_detail(
     Err(StatusCode::NOT_IMPLEMENTED)
 }
 
-// Status handlers
+// Status handlers - 修改为返回新的处理状态
 pub async fn get_processing_status(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<ProcessingStatus>>, StatusCode> {
+    match crate::database::operations::get_processing_status(state.database.pool()).await {
+        Ok(status) => Ok(Json(status)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+// 新增：获取详细的区块处理记录
+pub async fn get_detailed_processing_status(
     State(state): State<ApiState>,
 ) -> Result<Json<Vec<LastProcessedBlock>>, StatusCode> {
     match crate::database::operations::get_all_last_processed_blocks(state.database.pool()).await {

@@ -6,6 +6,11 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 use rust_decimal::Decimal;
 
+// 事件类型常量
+pub const EVENT_TYPE_FACTORY: &str = "factory";
+pub const EVENT_TYPE_SWAP: &str = "swap";
+pub const EVENT_TYPE_UNIFIED: &str = "unified";
+
 pub async fn create_tables(pool: &PgPool) -> Result<()> {
     // Create trading_pairs table with chain_id
     sqlx::query(
@@ -132,15 +137,17 @@ pub async fn create_tables(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Create last_processed_blocks table
+    // Create last_processed_blocks table with event_type
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS last_processed_blocks (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            chain_id INTEGER UNIQUE NOT NULL,
+            chain_id INTEGER NOT NULL,
+            event_type VARCHAR(20) NOT NULL DEFAULT 'unified',
             last_block_number BIGINT NOT NULL,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE(chain_id, event_type)
         )
         "#,
     )
@@ -149,6 +156,9 @@ pub async fn create_tables(pool: &PgPool) -> Result<()> {
 
     // Create indexes
     create_indexes(pool).await?;
+
+    // Create processing status view
+    create_processing_status_view(pool).await?;
 
     Ok(())
 }
@@ -167,12 +177,43 @@ async fn create_indexes(pool: &PgPool) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_burn_events_chain_pair ON burn_events(chain_id, pair_address)",
         "CREATE INDEX IF NOT EXISTS idx_burn_events_sender ON burn_events(sender)",
         "CREATE INDEX IF NOT EXISTS idx_burn_events_to_address ON burn_events(to_address)",
-        "CREATE INDEX IF NOT EXISTS idx_last_processed_blocks_chain_id ON last_processed_blocks(chain_id)",
+        "CREATE INDEX IF NOT EXISTS idx_last_processed_blocks_chain_event ON last_processed_blocks(chain_id, event_type)",
     ];
 
     for index_sql in indexes {
         sqlx::query(index_sql).execute(pool).await?;
     }
+
+    Ok(())
+}
+
+async fn create_processing_status_view(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE VIEW processing_status AS
+        SELECT 
+            chain_id,
+            CASE 
+                WHEN chain_id = 1 THEN 'Ethereum'
+                WHEN chain_id = 56 THEN 'BSC'
+                WHEN chain_id = 137 THEN 'Polygon'
+                WHEN chain_id = 42161 THEN 'Arbitrum'
+                ELSE 'Unknown'
+            END as chain_name,
+            MAX(CASE WHEN event_type = 'factory' THEN last_block_number END) as factory_block,
+            MAX(CASE WHEN event_type = 'swap' THEN last_block_number END) as swap_block,
+            MIN(CASE WHEN event_type IN ('factory', 'swap') THEN last_block_number END) as min_processed_block,
+            MAX(CASE WHEN event_type IN ('factory', 'swap') THEN last_block_number END) as max_processed_block,
+            MAX(CASE WHEN event_type = 'factory' THEN updated_at END) as factory_updated_at,
+            MAX(CASE WHEN event_type = 'swap' THEN updated_at END) as swap_updated_at
+        FROM last_processed_blocks 
+        WHERE event_type IN ('factory', 'swap')
+        GROUP BY chain_id
+        ORDER BY chain_id
+        "#
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
@@ -298,30 +339,32 @@ pub async fn insert_burn_event(pool: &PgPool, event: &BurnEvent) -> Result<()> {
     Ok(())
 }
 
-// Block tracking operations
-pub async fn get_last_processed_block(pool: &PgPool, chain_id: i32) -> Result<u64> {
+// 修改后的区块跟踪操作 - 支持事件类型
+pub async fn get_last_processed_block(pool: &PgPool, chain_id: i32, event_type: &str) -> Result<u64> {
     let result = sqlx::query_scalar::<_, i64>(
-        "SELECT last_block_number FROM last_processed_blocks WHERE chain_id = $1"
+        "SELECT last_block_number FROM last_processed_blocks WHERE chain_id = $1 AND event_type = $2"
     )
     .bind(chain_id)
+    .bind(event_type)
     .fetch_optional(pool)
     .await?;
 
     Ok(result.unwrap_or(0) as u64)
 }
 
-pub async fn update_last_processed_block(pool: &PgPool, chain_id: i32, block_number: u64) -> Result<()> {
+pub async fn update_last_processed_block(pool: &PgPool, chain_id: i32, event_type: &str, block_number: u64) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO last_processed_blocks (chain_id, last_block_number)
-        VALUES ($1, $2)
-        ON CONFLICT (chain_id) 
+        INSERT INTO last_processed_blocks (chain_id, event_type, last_block_number)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (chain_id, event_type) 
         DO UPDATE SET 
-            last_block_number = $2,
+            last_block_number = $3,
             updated_at = NOW()
         "#
     )
     .bind(chain_id)
+    .bind(event_type)
     .bind(block_number as i64)
     .execute(pool)
     .await?;
@@ -329,15 +372,16 @@ pub async fn update_last_processed_block(pool: &PgPool, chain_id: i32, block_num
     Ok(())
 }
 
-pub async fn initialize_last_processed_block(pool: &PgPool, chain_id: i32, start_block: u64) -> Result<()> {
+pub async fn initialize_last_processed_block(pool: &PgPool, chain_id: i32, event_type: &str, start_block: u64) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO last_processed_blocks (chain_id, last_block_number)
-        VALUES ($1, $2)
-        ON CONFLICT (chain_id) DO NOTHING
+        INSERT INTO last_processed_blocks (chain_id, event_type, last_block_number)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (chain_id, event_type) DO NOTHING
         "#
     )
     .bind(chain_id)
+    .bind(event_type)
     .bind(start_block as i64)
     .execute(pool)
     .await?;
@@ -347,12 +391,23 @@ pub async fn initialize_last_processed_block(pool: &PgPool, chain_id: i32, start
 
 pub async fn get_all_last_processed_blocks(pool: &PgPool) -> Result<Vec<LastProcessedBlock>> {
     let blocks = sqlx::query_as::<_, LastProcessedBlock>(
-        "SELECT * FROM last_processed_blocks ORDER BY chain_id"
+        "SELECT * FROM last_processed_blocks ORDER BY chain_id, event_type"
     )
     .fetch_all(pool)
     .await?;
 
     Ok(blocks)
+}
+
+// 新增：获取处理状态视图
+pub async fn get_processing_status(pool: &PgPool) -> Result<Vec<ProcessingStatus>> {
+    let status = sqlx::query_as::<_, ProcessingStatus>(
+        "SELECT * FROM processing_status ORDER BY chain_id"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(status)
 }
 
 // Kline data operations

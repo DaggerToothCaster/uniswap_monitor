@@ -26,9 +26,23 @@ pub struct TradingPair {
 pub struct LastProcessedBlock {
     pub id: Uuid,
     pub chain_id: i32,
+    pub event_type: String,  // 新增：事件类型字段
     pub last_block_number: i64,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+}
+
+// 新增：处理状态视图
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ProcessingStatus {
+    pub chain_id: i32,
+    pub chain_name: String,
+    pub factory_block: Option<i64>,
+    pub swap_block: Option<i64>,
+    pub min_processed_block: Option<i64>,
+    pub max_processed_block: Option<i64>,
+    pub factory_updated_at: Option<DateTime<Utc>>,
+    pub swap_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

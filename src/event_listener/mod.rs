@@ -30,42 +30,52 @@ impl EventListenerManager {
         let provider = Arc::new(Provider::<Http>::try_from(&config.rpc_url)?);
         let factory_address: Address = config.factory_address.parse()?;
 
-        // Start factory event listener
-        let mut factory_listener = FactoryEventListener::new(
-            Arc::clone(&provider),
-            Arc::clone(&self.database),
-            chain_id,
-            factory_address,
-            self.event_sender.clone(),
-            config.poll_interval,
-            config.start_block,
-            config.block_batch_size,  // 使用统一的批次大小
-        );
-
+        // 启动工厂事件监听器
+        let factory_provider = Arc::clone(&provider);
+        let factory_database = Arc::clone(&self.database);
+        let factory_sender = self.event_sender.clone();
+        let factory_config = config.clone();
+        
         let factory_handle = tokio::spawn(async move {
+            let mut factory_listener = FactoryEventListener::new(
+                factory_provider,
+                factory_database,
+                chain_id,
+                factory_address,
+                factory_sender,
+                factory_config.poll_interval,
+                factory_config.start_block,
+                factory_config.block_batch_size,
+            );
+
             if let Err(e) = factory_listener.start_monitoring().await {
-                tracing::error!("Factory listener error for chain {}: {}", chain_id, e);
+                tracing::error!("链 {} 工厂事件监听器错误: {}", chain_id, e);
             }
         });
 
-        // Start swap event listener
-        let mut swap_listener = SwapEventListener::new(
-            Arc::clone(&provider),
-            Arc::clone(&self.database),
-            chain_id,
-            self.event_sender.clone(),
-            config.poll_interval,
-            config.start_block,
-            config.block_batch_size,  // 使用统一的批次大小
-        );
-
+        // 启动交换事件监听器
+        let swap_provider = Arc::clone(&provider);
+        let swap_database = Arc::clone(&self.database);
+        let swap_sender = self.event_sender.clone();
+        let swap_config = config.clone();
+        
         let swap_handle = tokio::spawn(async move {
+            let mut swap_listener = SwapEventListener::new(
+                swap_provider,
+                swap_database,
+                chain_id,
+                swap_sender,
+                swap_config.poll_interval,
+                swap_config.start_block,
+                swap_config.block_batch_size,
+            );
+
             if let Err(e) = swap_listener.start_monitoring().await {
-                tracing::error!("Swap listener error for chain {}: {}", chain_id, e);
+                tracing::error!("链 {} 交换事件监听器错误: {}", chain_id, e);
             }
         });
 
-        // Wait for both listeners (they run indefinitely)
+        // 等待两个监听器
         tokio::try_join!(factory_handle, swap_handle)?;
 
         Ok(())
