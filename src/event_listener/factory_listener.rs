@@ -124,22 +124,22 @@ impl FactoryEventListener {
 
             let logs = match self.base.provider.get_logs(&filter).await {
                 Ok(logs) => {
-                    if logs.is_empty() {
-                        debug!(
-                            "🏭 链 {}: 区块 {}-{} 中没有发现工厂事件",
-                            self.base.chain_id, from_block, to_block
-                        );
-                    } else {
-                        info!(
-                            "🏭 链 {}: 发现 {} 个新交易对创建事件",
-                            self.base.chain_id,
-                            logs.len()
-                        );
-                    }
+                    debug!(
+                        "🔍 链 {}: 区块 {}-{} 获取到 {} 个工厂事件",
+                        self.base.chain_id,
+                        from_block,
+                        to_block,
+                        logs.len()
+                    );
                     logs
                 }
                 Err(e) => {
-                    if e.to_string().contains("null") {
+                    if e.to_string().to_lowercase().contains("null") {
+                        debug!(
+                            "📭 链 {}: 区块 {}-{} 返回空日志，视为无事件",
+                            self.base.chain_id, from_block, to_block
+                        );
+                        self.base.update_last_processed_block(to_block).await?;
                         return Ok(());
                     } else {
                         error!("❌ 链 {}: 获取工厂事件失败: {}", self.base.chain_id, e);
@@ -147,6 +147,23 @@ impl FactoryEventListener {
                     }
                 }
             };
+
+            // 如果日志为空，直接更新区块并返回
+            if logs.is_empty() {
+                debug!(
+                    "📭 链 {}: 区块 {}-{} 中没有发现工厂事件",
+                    self.base.chain_id, from_block, to_block
+                );
+                self.base.update_last_processed_block(to_block).await?;
+                return Ok(());
+            }
+
+            // 处理有效日志
+            info!(
+                "🏭 链 {}: 发现 {} 个新交易对创建事件",
+                self.base.chain_id,
+                logs.len()
+            );
 
             let mut processed = 0;
             let mut failed = 0;
@@ -166,10 +183,11 @@ impl FactoryEventListener {
             }
 
             info!(
-                "⛓️   📊  链 {}: 工厂事件处理总结 - 成功: {}, 失败: {}",
+                "⛓️  📊  链 {}: 工厂事件处理总结 - 成功: {}, 失败: {}",
                 self.base.chain_id, processed, failed
             );
 
+            // 处理完成后更新最后处理的区块
             self.base.update_last_processed_block(to_block).await?;
         }
 
