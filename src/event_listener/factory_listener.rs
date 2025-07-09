@@ -46,6 +46,7 @@ impl FactoryEventListener {
         poll_interval: u64,
         start_block: u64,
         factory_block_batch_size: u64,
+        pair_block_batch_size: u64,
     ) -> Self {
         Self {
             base: BaseEventListener::new(
@@ -55,6 +56,8 @@ impl FactoryEventListener {
                 event_sender,
                 poll_interval,
                 start_block,
+                factory_block_batch_size,
+                pair_block_batch_size,
             ),
             factory_address,
             factory_block_batch_size,
@@ -68,10 +71,16 @@ impl FactoryEventListener {
         self.base.initialize_last_processed_block().await?;
 
         let latest_block = self.base.provider.get_block_number().await?.as_u64();
-        info!("🔗 链 {}: 当前最新区块: {}", self.base.chain_id, latest_block);
+        info!(
+            "🔗 链 {}: 当前最新区块: {}",
+            self.base.chain_id, latest_block
+        );
 
         if self.base.last_processed_block >= latest_block {
-            info!("✅ 链 {}: 已处理到最新区块，等待新区块...", self.base.chain_id);
+            info!(
+                "✅ 链 {}: 已处理到最新区块，等待新区块...",
+                self.base.chain_id
+            );
         } else {
             let blocks_behind = latest_block - self.base.last_processed_block;
             info!(
@@ -94,7 +103,11 @@ impl FactoryEventListener {
     }
 
     async fn poll_factory_events(&mut self) -> Result<()> {
-        if let Some((from_block, to_block)) = self.base.get_current_block_range(self.factory_block_batch_size).await? {
+        if let Some((from_block, to_block)) = self
+            .base
+            .get_current_block_range(self.factory_block_batch_size)
+            .await?
+        {
             info!(
                 "🏭 链 {}: 处理工厂事件 - 区块: {}-{} (共 {} 个区块)",
                 self.base.chain_id,
@@ -124,12 +137,9 @@ impl FactoryEventListener {
                         );
                     }
                     logs
-                },
+                }
                 Err(e) => {
-                    error!(
-                        "❌ 链 {}: 获取工厂事件失败: {}",
-                        self.base.chain_id, e
-                    );
+                    error!("❌ 链 {}: 获取工厂事件失败: {}", self.base.chain_id, e);
                     return Err(e.into());
                 }
             };
@@ -177,7 +187,8 @@ impl FactoryEventListener {
 
         let block_number = log.block_number.unwrap();
         let block_number_hex = format!("0x{:x}", block_number);
-        let raw_block: serde_json::Value = self.base
+        let raw_block: serde_json::Value = self
+            .base
             .provider
             .request(
                 "eth_getBlockByNumber",
@@ -193,8 +204,10 @@ impl FactoryEventListener {
             DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
 
         info!("🔍 链 {}: 读取 token 信息...", self.base.chain_id);
-        let (token0_symbol, token0_name, token0_decimals) = self.get_token_info(event.token_0).await;
-        let (token1_symbol, token1_name, token1_decimals) = self.get_token_info(event.token_1).await;
+        let (token0_symbol, token0_name, token0_decimals) =
+            self.get_token_info(event.token_0).await;
+        let (token1_symbol, token1_name, token1_decimals) =
+            self.get_token_info(event.token_1).await;
 
         let pair = TradingPair {
             id: Uuid::new_v4(),
@@ -263,10 +276,7 @@ impl FactoryEventListener {
         let name = match contract.name().call().await {
             Ok(n) => Some(n),
             Err(e) => {
-                warn!(
-                    "Failed to get name for token 0x{:x}: {}",
-                    token_address, e
-                );
+                warn!("Failed to get name for token 0x{:x}: {}", token_address, e);
                 None
             }
         };

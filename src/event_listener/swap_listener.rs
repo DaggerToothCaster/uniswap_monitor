@@ -36,6 +36,7 @@ impl SwapEventListener {
         chain_id: u64,
         event_sender: broadcast::Sender<String>,
         poll_interval: u64,
+        start_block: u64,
         pair_block_batch_size: u64,
     ) -> Self {
         Self {
@@ -45,7 +46,9 @@ impl SwapEventListener {
                 chain_id,
                 event_sender,
                 poll_interval,
-                0, // Swap listener uses same block tracking as factory
+                start_block,
+                0, //factory_block_batch_size
+                pair_block_batch_size
             ),
             pair_block_batch_size,
         }

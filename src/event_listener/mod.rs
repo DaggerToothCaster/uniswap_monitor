@@ -44,6 +44,7 @@ impl EventListenerManager {
             config.poll_interval,
             config.start_block,
             config.factory_block_batch_size,
+            config.pair_block_batch_size,
         );
 
         let factory_handle = tokio::spawn(async move {
@@ -59,6 +60,7 @@ impl EventListenerManager {
             chain_id,
             self.event_sender.clone(),
             config.poll_interval,
+            config.start_block,
             config.pair_block_batch_size,
         );
 

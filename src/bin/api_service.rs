@@ -1,17 +1,13 @@
-
-use config::Config;
-use crate::services::{EventService,ApiService};
+use crate::services::{ApiService, EventService};
 use anyhow::Result;
+use config::Config;
 use tracing::{info, Level};
 use tracing_subscriber;
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .init();
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     info!("🔧 启动独立API服务...");
 
