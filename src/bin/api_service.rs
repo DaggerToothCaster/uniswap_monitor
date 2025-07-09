@@ -1,5 +1,6 @@
 
-use uniswap_monitor::services::{ApiService, EventService};
+#![allow(warnings)]
+use uniswap_monitor::services::{ApiService};
 use anyhow::Result;
 use uniswap_monitor::config::Config;
 use tracing::{info, Level};
