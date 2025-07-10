@@ -24,5 +24,6 @@ impl Database {
     }
 }
 
-// Re-export operations
+// Re-export operations and utils
 pub use operations::*;
+pub use utils::*;
