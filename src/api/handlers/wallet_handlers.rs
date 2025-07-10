@@ -89,8 +89,14 @@ pub async fn get_wallet_pnl(
     Path(address): Path<String>,
     Query(params): Query<WalletStatsQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<WalletPnLRecord>>, StatusCode> {
-    match WalletOperations::get_wallet_pnl(state.database.pool(), params.chain_id, &address).await {
+) -> Result<Json<HashMap<String, serde_json::Value>>, StatusCode> {
+    match WalletOperations::get_wallet_pnl(
+        state.database.pool(),
+        params.chain_id, // 注意这里 chain_id 应该是 Option<i32> 类型
+        &address,
+    )
+    .await
+    {
         Ok(pnl) => Ok(Json(pnl)),
         Err(e) => {
             tracing::error!("Failed to get wallet PnL: {}", e);
