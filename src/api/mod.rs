@@ -1,21 +1,19 @@
 pub mod handlers;
-pub mod websocket;
 pub mod routes;
-
-pub use routes::create_router;
+pub mod websocket;
 
 use crate::database::Database;
-use std::sync::Arc;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub database: Arc<Database>,
+    pub database: Database,
     pub event_sender: broadcast::Sender<String>,
 }
 
 impl ApiState {
-    pub fn new(database: Arc<Database>, event_sender: broadcast::Sender<String>) -> Self {
+    pub fn new(database: Database) -> Self {
+        let (event_sender, _) = broadcast::channel(1000);
         Self {
             database,
             event_sender,

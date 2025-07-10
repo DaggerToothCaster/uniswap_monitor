@@ -12,6 +12,8 @@ pub struct TradeRecord {
     pub pair_address: String,
     pub token0_symbol: Option<String>,
     pub token1_symbol: Option<String>,
+    pub token0_decimals: Option<i32>,
+    pub token1_decimals: Option<i32>,
     pub transaction_hash: String,
     pub sender: String,
     pub to_address: String,
@@ -33,6 +35,8 @@ pub struct LiquidityRecord {
     pub pair_address: String,
     pub token0_symbol: Option<String>,
     pub token1_symbol: Option<String>,
+    pub token0_decimals: Option<i32>,
+    pub token1_decimals: Option<i32>,
     pub transaction_hash: String,
     pub sender: String,
     pub to_address: Option<String>,
@@ -136,6 +140,29 @@ pub struct PairStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairDetail {
+    pub pair_address: String,
+    pub chain_id: i32,
+    pub token0: String,
+    pub token1: String,
+    pub token0_symbol: Option<String>,
+    pub token1_symbol: Option<String>,
+    pub token0_name: Option<String>,
+    pub token1_name: Option<String>,
+    pub token0_decimals: Option<i32>,
+    pub token1_decimals: Option<i32>,
+    pub current_price: Decimal,
+    pub volume_24h: Decimal,
+    pub volume_7d: Decimal,
+    pub liquidity: Decimal,
+    pub price_change_24h: Decimal,
+    pub price_change_7d: Decimal,
+    pub tx_count_24h: i64,
+    pub tx_count_7d: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainStats {
     pub chain_id: i32,
     pub chain_name: String,
@@ -143,4 +170,61 @@ pub struct ChainStats {
     pub total_volume_24h: Decimal,
     pub total_liquidity: Decimal,
     pub active_pairs_24h: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletStats {
+    pub wallet_address: String,
+    pub chain_id: Option<i32>,
+    pub total_transactions: i64,
+    pub total_volume_usd: Decimal,
+    pub total_fees_paid: Decimal,
+    pub profit_loss: Decimal,
+    pub win_rate: Decimal,
+    pub avg_trade_size: Decimal,
+    pub first_transaction: DateTime<Utc>,
+    pub last_transaction: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletPortfolioItem {
+    pub token_address: String,
+    pub token_symbol: String,
+    pub token_name: String,
+    pub balance: Decimal,
+    pub value_usd: Decimal,
+    pub avg_buy_price: Decimal,
+    pub current_price: Decimal,
+    pub profit_loss: Decimal,
+    pub profit_loss_percentage: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletPnLRecord {
+    pub date: DateTime<Utc>,
+    pub realized_pnl: Decimal,
+    pub unrealized_pnl: Decimal,
+    pub total_pnl: Decimal,
+    pub volume: Decimal,
+    pub fees_paid: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemHealth {
+    pub status: String,
+    pub database_status: String,
+    pub event_listeners_status: Vec<EventListenerStatus>,
+    pub last_block_processed: i64,
+    pub blocks_behind: i64,
+    pub uptime_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventListenerStatus {
+    pub chain_id: i32,
+    pub event_type: String,
+    pub status: String,
+    pub last_processed_block: i64,
+    pub blocks_behind: i64,
+    pub last_updated: DateTime<Utc>,
 }
