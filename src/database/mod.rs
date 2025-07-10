@@ -5,7 +5,7 @@ use anyhow::Result;
 // Re-export operations and utils
 pub use operations::*;
 pub use utils::*;
-
+#[derive(Clone)]
 pub struct Database {
     pool: PgPool,
 }

@@ -1,3 +1,4 @@
+// ApiService 部分
 use crate::{api::{create_router, ApiState}, config::Config, database::Database};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -32,7 +33,7 @@ impl ApiService {
         info!("🚀 启动API服务...");
 
         let api_state = ApiState::new(
-            Arc::clone(&self.database),
+            self.database.clone(),  // 这里使用clone()获取Arc内部值的引用
             self.event_sender.clone(),
         );
 

@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 
 #[derive(Debug, Deserialize)]
 pub struct WebSocketQuery {
@@ -46,13 +49,19 @@ pub async fn websocket_handler(
     ws.on_upgrade(move |socket| handle_websocket(socket, state, channels))
 }
 
+
+
 async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: Vec<String>) {
     let (mut sender, mut receiver) = socket.split();
     let mut event_receiver = state.event_sender.subscribe();
-    let mut subscribed_channels: HashMap<String, bool> = initial_channels
-        .into_iter()
-        .map(|c| (c, true))
-        .collect();
+    
+    // 使用 Arc<Mutex> 包装 subscribed_channels 以共享可变状态
+    let subscribed_channels = Arc::new(Mutex::new(
+        initial_channels
+            .into_iter()
+            .map(|c| (c, true))
+            .collect::<HashMap<String, bool>>()
+    ));
 
     // 发送连接成功消息
     let welcome_msg = WebSocketMessage {
@@ -60,7 +69,7 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
         channel: None,
         data: serde_json::json!({
             "message": "WebSocket connected successfully",
-            "subscribed_channels": subscribed_channels.keys().collect::<Vec<_>>()
+            "subscribed_channels": subscribed_channels.lock().await.keys().cloned().collect::<Vec<_>>()
         }),
         timestamp: chrono::Utc::now(),
     };
@@ -69,10 +78,10 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
         let _ = sender.send(Message::Text(msg)).await;
     }
 
-    // 处理消息的任务
+    // 克隆 Arc 用于 sender_task
+    let sender_channels = Arc::clone(&subscribed_channels);
     let sender_task = tokio::spawn(async move {
         while let Ok(event) = event_receiver.recv().await {
-            // 解析事件消息
             if let Ok(event_data) = serde_json::from_str::<serde_json::Value>(&event) {
                 let event_type = event_data.get("type")
                     .and_then(|t| t.as_str())
@@ -80,8 +89,9 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
 
                 let channel = get_channel_for_event(event_type);
 
-                // 检查是否订阅了该频道
-                if subscribed_channels.contains_key(&channel) || subscribed_channels.contains_key("all") {
+                // 获取锁并检查订阅状态
+                let channels = sender_channels.lock().await;
+                if channels.contains_key(&channel) || channels.contains_key("all") {
                     let ws_message = WebSocketMessage {
                         r#type: event_type.to_string(),
                         channel: Some(channel),
@@ -99,34 +109,28 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
         }
     });
 
-    // 处理客户端消息的任务
+    // 克隆 Arc 用于 receiver_task
+    let receiver_channels = Arc::clone(&subscribed_channels);
     let receiver_task = tokio::spawn(async move {
         while let Some(msg) = receiver.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    // 处理订阅/取消订阅消息
                     if let Ok(subscribe_msg) = serde_json::from_str::<SubscribeMessage>(&text) {
+                        let mut channels = receiver_channels.lock().await;
                         match subscribe_msg.action.as_str() {
                             "subscribe" => {
                                 for channel in subscribe_msg.channels {
-                                    subscribed_channels.insert(channel, true);
+                                    channels.insert(channel, true);
                                 }
                             }
                             "unsubscribe" => {
                                 for channel in subscribe_msg.channels {
-                                    subscribed_channels.remove(&channel);
+                                    channels.remove(&channel);
                                 }
                             }
                             _ => {
-                                // 发送错误消息
-                                let error_msg = ErrorMessage {
-                                    error: "invalid_action".to_string(),
-                                    message: "Action must be 'subscribe' or 'unsubscribe'".to_string(),
-                                };
-                                if let Ok(msg) = serde_json::to_string(&error_msg) {
-                                    // 这里需要访问sender，但它已经被移动了
-                                    // 实际实现中需要使用Arc<Mutex<>>或其他同步原语
-                                }
+                                // 注意：这里无法直接发送错误消息，因为 sender 已经被移动
+                                // 如果需要发送错误消息，可以考虑其他方式
                             }
                         }
                     }
@@ -138,12 +142,13 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
         }
     });
 
-    // 等待任一任务完成
     tokio::select! {
         _ = sender_task => {},
         _ = receiver_task => {},
     }
 }
+
+
 
 fn get_channel_for_event(event_type: &str) -> String {
     match event_type {

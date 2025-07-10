@@ -4626,6 +4626,7 @@ dependencies = [
  "config",
  "dotenv",
  "ethers",
+ "futures-util",
  "hex",
  "rust_decimal",
  "serde",
