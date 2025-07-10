@@ -51,7 +51,7 @@ pub struct BurnEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KlineData {
+pub struct KLineData {
     pub timestamp: DateTime<Utc>,
     pub open: Decimal,
     pub high: Decimal,

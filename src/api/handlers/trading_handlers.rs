@@ -69,7 +69,7 @@ pub async fn get_kline(
     Path((chain_id, address)): Path<(i32, String)>,
     Query(params): Query<KlineQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<KlineData>>, StatusCode> {
+) -> Result<Json<Vec<KLineData>>, StatusCode> {
     let interval = params.interval.unwrap_or_else(|| "1h".to_string());
     let limit = params.limit.unwrap_or(100);
 

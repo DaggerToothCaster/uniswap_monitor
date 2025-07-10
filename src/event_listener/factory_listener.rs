@@ -1,6 +1,5 @@
 use super::base_listener::BaseEventListener;
 use crate::types::*;
-use crate::database::operations::EVENT_TYPE_FACTORY;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ethers::{
@@ -9,11 +8,13 @@ use ethers::{
     providers::{Http, Middleware, Provider},
     types::{Address, BlockNumber, Filter, Log, U256},
 };
-use rust_decimal::Decimal;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+use crate::database::operations::EVENT_TYPE_FACTORY;
+use crate::database::operations::{EventOperations, TradingOperations};
 
 abigen!(
     UniswapV2Factory,
@@ -56,7 +57,7 @@ impl FactoryEventListener {
                 poll_interval,
                 start_block,
                 block_batch_size,
-                EVENT_TYPE_FACTORY.to_string(),  // 使用工厂事件类型
+                EVENT_TYPE_FACTORY.to_string(), // 使用工厂事件类型
             ),
             factory_address,
         }
@@ -69,10 +70,16 @@ impl FactoryEventListener {
         self.base.initialize_last_processed_block().await?;
 
         let latest_block = self.base.provider.get_block_number().await?.as_u64();
-        info!("🔗 链 {} (工厂): 当前最新区块: {}", self.base.chain_id, latest_block);
+        info!(
+            "🔗 链 {} (工厂): 当前最新区块: {}",
+            self.base.chain_id, latest_block
+        );
 
         if self.base.last_processed_block >= latest_block {
-            info!("✅ 链 {} (工厂): 已处理到最新区块，等待新区块...", self.base.chain_id);
+            info!(
+                "✅ 链 {} (工厂): 已处理到最新区块，等待新区块...",
+                self.base.chain_id
+            );
         } else {
             let blocks_behind = latest_block - self.base.last_processed_block;
             info!(
@@ -86,7 +93,10 @@ impl FactoryEventListener {
 
         loop {
             if let Err(e) = self.poll_factory_events().await {
-                error!("❌ 链 {} (工厂): 轮询工厂事件时出错: {}", self.base.chain_id, e);
+                error!(
+                    "❌ 链 {} (工厂): 轮询工厂事件时出错: {}",
+                    self.base.chain_id, e
+                );
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
 
@@ -130,7 +140,10 @@ impl FactoryEventListener {
                         self.base.update_last_processed_block(to_block).await?;
                         return Ok(());
                     } else {
-                        error!("❌ 链 {} (工厂): 获取工厂事件失败: {}", self.base.chain_id, e);
+                        error!(
+                            "❌ 链 {} (工厂): 获取工厂事件失败: {}",
+                            self.base.chain_id, e
+                        );
                         return Err(e.into());
                     }
                 }
@@ -190,7 +203,8 @@ impl FactoryEventListener {
 
         let block_number = log.block_number.unwrap();
         let block_number_hex = format!("0x{:x}", block_number);
-        let raw_block: serde_json::Value = self.base
+        let raw_block: serde_json::Value = self
+            .base
             .provider
             .request(
                 "eth_getBlockByNumber",
@@ -206,8 +220,10 @@ impl FactoryEventListener {
             DateTime::<Utc>::from_timestamp(timestamp_u64 as i64, 0).unwrap_or_else(|| Utc::now());
 
         info!("🔍 链 {} (工厂): 读取 token 信息...", self.base.chain_id);
-        let (token0_symbol, token0_name, token0_decimals) = self.get_token_info(event.token_0).await;
-        let (token1_symbol, token1_name, token1_decimals) = self.get_token_info(event.token_1).await;
+        let (token0_symbol, token0_name, token0_decimals) =
+            self.get_token_info(event.token_0).await;
+        let (token1_symbol, token1_name, token1_decimals) =
+            self.get_token_info(event.token_1).await;
 
         let pair = TradingPair {
             id: Uuid::new_v4(),
@@ -226,7 +242,7 @@ impl FactoryEventListener {
             transaction_hash: format!("0x{:x}", log.transaction_hash.unwrap()),
         };
 
-        crate::database::operations::insert_trading_pair(self.base.database.pool(), &pair).await?;
+        TradingOperations::insert_trading_pair(self.base.database.pool(), &pair).await?;
 
         let _ = self.base.event_sender.send(serde_json::to_string(&pair)?);
 
@@ -276,10 +292,7 @@ impl FactoryEventListener {
         let name = match contract.name().call().await {
             Ok(n) => Some(n),
             Err(e) => {
-                warn!(
-                    "Failed to get name for token 0x{:x}: {}",
-                    token_address, e
-                );
+                warn!("Failed to get name for token 0x{:x}: {}", token_address, e);
                 None
             }
         };

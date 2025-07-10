@@ -1,3 +1,4 @@
+use crate::database::operations::EventOperations;
 use crate::database::Database;
 use anyhow::Result;
 use ethers::{
@@ -7,7 +8,6 @@ use ethers::{
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
-
 pub struct BaseEventListener {
     pub provider: Arc<Provider<Http>>,
     pub database: Arc<Database>,
@@ -17,7 +17,7 @@ pub struct BaseEventListener {
     pub last_processed_block: u64,
     pub start_block: u64,
     pub block_batch_size: u64,
-    pub event_type: String,  // 新增：事件类型标识
+    pub event_type: String, // 新增：事件类型标识
 }
 
 impl BaseEventListener {
@@ -29,7 +29,7 @@ impl BaseEventListener {
         poll_interval: u64,
         start_block: u64,
         block_batch_size: u64,
-        event_type: String,  // 新增参数
+        event_type: String, // 新增参数
     ) -> Self {
         Self {
             provider,
@@ -46,7 +46,7 @@ impl BaseEventListener {
 
     pub async fn initialize_last_processed_block(&mut self) -> Result<()> {
         // Initialize last processed block record if not exists
-        crate::database::operations::initialize_last_processed_block(
+        EventOperations::initialize_last_processed_block(
             self.database.pool(),
             self.chain_id as i32,
             &self.event_type,
@@ -55,7 +55,7 @@ impl BaseEventListener {
         .await?;
 
         // Get last processed block from database
-        self.last_processed_block = crate::database::operations::get_last_processed_block(
+        self.last_processed_block = EventOperations::get_last_processed_block(
             self.database.pool(),
             self.chain_id as i32,
             &self.event_type,
@@ -66,12 +66,16 @@ impl BaseEventListener {
             self.last_processed_block = self.start_block;
             tracing::info!(
                 "📍 链 {} ({}): 使用配置的起始区块: {}",
-                self.chain_id, self.event_type, self.start_block
+                self.chain_id,
+                self.event_type,
+                self.start_block
             );
         } else {
             tracing::info!(
                 "📍 链 {} ({}): 从数据库恢复，上次处理到区块: {}",
-                self.chain_id, self.event_type, self.last_processed_block
+                self.chain_id,
+                self.event_type,
+                self.last_processed_block
             );
         }
 
@@ -80,7 +84,7 @@ impl BaseEventListener {
 
     pub async fn update_last_processed_block(&mut self, block_number: u64) -> Result<()> {
         self.last_processed_block = block_number;
-        crate::database::operations::update_last_processed_block(
+        EventOperations::update_last_processed_block(
             self.database.pool(),
             self.chain_id as i32,
             &self.event_type,

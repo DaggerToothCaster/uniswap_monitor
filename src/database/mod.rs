@@ -1,10 +1,10 @@
 pub mod operations;
 pub mod utils;
-
-use crate::types::*;
-use anyhow::Result;
 use sqlx::PgPool;
-use std::sync::Arc;
+use anyhow::Result;
+// Re-export operations and utils
+pub use operations::*;
+pub use utils::*;
 
 pub struct Database {
     pool: PgPool,
@@ -20,10 +20,6 @@ impl Database {
     }
 
     pub async fn create_tables(&self) -> Result<()> {
-        operations::create_tables(&self.pool).await
+        SystemOperations::create_tables(&self.pool).await
     }
 }
-
-// Re-export operations and utils
-pub use operations::*;
-pub use utils::*;

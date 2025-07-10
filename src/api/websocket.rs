@@ -151,7 +151,6 @@ fn get_channel_for_event(event_type: &str) -> String {
         "new_swap" | "swap_event" => "swaps".to_string(),
         "new_mint" | "mint_event" => "liquidity".to_string(),
         "new_burn" | "burn_event" => "liquidity".to_string(),
-        "token_metadata_created" | "token_metadata_updated" | "token_verified" => "tokens".to_string(),
         "price_update" => "prices".to_string(),
         "volume_update" => "volume".to_string(),
         _ => "general".to_string(),

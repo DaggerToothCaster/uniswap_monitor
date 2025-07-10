@@ -6,7 +6,7 @@ pub mod stats_operations;
 pub mod metadata_operations;
 pub mod system_operations;
 
-// 重新导出所有公共函数
+// Re-export all operations for backward compatibility
 pub use trading_operations::*;
 pub use token_operations::*;
 pub use event_operations::*;
@@ -15,7 +15,7 @@ pub use stats_operations::*;
 pub use metadata_operations::*;
 pub use system_operations::*;
 
-// 事件类型常量
-pub const EVENT_TYPE_FACTORY: &str = "factory";
-pub const EVENT_TYPE_SWAP: &str = "swap";
-pub const EVENT_TYPE_UNIFIED: &str = "unified";
+// Event type constants
+pub const EVENT_TYPE_SWAP: &str = "Swap";
+pub const EVENT_TYPE_MINT: &str = "Mint";
+pub const EVENT_TYPE_BURN: &str = "Burn";

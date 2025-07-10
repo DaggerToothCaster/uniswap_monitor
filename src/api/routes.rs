@@ -36,7 +36,7 @@ pub fn create_router(state: ApiState) -> Router {
         // Token metadata management routes
         .route("/api/metadata/tokens", 
                get(handlers::list_token_metadata)
-               .post(handlers::create_token_metadata))
+               .post(handlers::update_token_metadata))
         .route("/api/metadata/tokens/:chain_id/:address", 
                get(handlers::get_token_metadata)
                .put(handlers::update_token_metadata)
