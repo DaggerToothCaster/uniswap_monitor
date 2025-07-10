@@ -1,4 +1,5 @@
 use super::super::ApiState;
+use crate::database::operations::WalletOperations;
 use crate::types::*;
 use axum::{
     extract::{Path, Query, State},
@@ -6,6 +7,7 @@ use axum::{
     response::Json,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct WalletQuery {
@@ -30,14 +32,16 @@ pub async fn get_wallet_transactions(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
-    match crate::database::operations::get_wallet_transactions(
-        state.database.pool(), 
-        &address, 
-        params.chain_id, 
-        limit, 
+    match WalletOperations::get_wallet_transactions(
+        state.database.pool(),
+        &address,
+        params.chain_id,
+        limit,
         offset,
-        params.transaction_type.as_deref()
-    ).await {
+        params.transaction_type.as_deref(),
+    )
+    .await
+    {
         Ok(transactions) => Ok(Json(transactions)),
         Err(e) => {
             tracing::error!("Failed to get wallet transactions: {}", e);
@@ -53,12 +57,9 @@ pub async fn get_wallet_stats(
 ) -> Result<Json<WalletStats>, StatusCode> {
     let days = params.days.unwrap_or(30);
 
-    match crate::database::operations::get_wallet_stats(
-        state.database.pool(), 
-        &address, 
-        params.chain_id, 
-        days
-    ).await {
+    match WalletOperations::get_wallet_stats(state.database.pool(), &address, params.chain_id, days)
+        .await
+    {
         Ok(Some(stats)) => Ok(Json(stats)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -72,12 +73,10 @@ pub async fn get_wallet_portfolio(
     Path(address): Path<String>,
     Query(params): Query<WalletQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<WalletPortfolioItem>>, StatusCode> {
-    match crate::database::operations::get_wallet_portfolio(
-        state.database.pool(), 
-        &address, 
-        params.chain_id
-    ).await {
+) -> Result<Json<Vec<HashMap<String, serde_json::Value>>>, StatusCode> {
+    match WalletOperations::get_wallet_portfolio(state.database.pool(), params.chain_id, &address)
+        .await
+    {
         Ok(portfolio) => Ok(Json(portfolio)),
         Err(e) => {
             tracing::error!("Failed to get wallet portfolio: {}", e);
@@ -91,14 +90,7 @@ pub async fn get_wallet_pnl(
     Query(params): Query<WalletStatsQuery>,
     State(state): State<ApiState>,
 ) -> Result<Json<Vec<WalletPnLRecord>>, StatusCode> {
-    let days = params.days.unwrap_or(30);
-
-    match crate::database::operations::get_wallet_pnl(
-        state.database.pool(), 
-        &address, 
-        params.chain_id, 
-        days
-    ).await {
+    match WalletOperations::get_wallet_pnl(state.database.pool(), params.chain_id, &address).await {
         Ok(pnl) => Ok(Json(pnl)),
         Err(e) => {
             tracing::error!("Failed to get wallet PnL: {}", e);

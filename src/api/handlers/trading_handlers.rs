@@ -6,6 +6,7 @@ use axum::{
     response::Json,
 };
 use serde::Deserialize;
+use crate::database::operations::{TradingOperations};
 
 #[derive(Debug, Deserialize)]
 pub struct KlineQuery {
@@ -42,7 +43,7 @@ pub async fn get_pairs(
     Query(params): Query<PairsQuery>,
     State(state): State<ApiState>,
 ) -> Result<Json<Vec<TradingPair>>, StatusCode> {
-    match crate::database::operations::get_all_pairs(state.database.pool(), params.chain_id).await {
+    match TradingOperations::get_all_pairs(state.database.pool(), params.chain_id).await {
         Ok(pairs) => Ok(Json(pairs)),
         Err(e) => {
             tracing::error!("Failed to get pairs: {}", e);
@@ -55,7 +56,7 @@ pub async fn get_pair_detail(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
 ) -> Result<Json<PairDetail>, StatusCode> {
-    match crate::database::operations::get_pair_detail(state.database.pool(), &address, chain_id).await {
+    match TradingOperations::get_pair_detail(state.database.pool(), &address, chain_id).await {
         Ok(Some(detail)) => Ok(Json(detail)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -78,7 +79,7 @@ pub async fn get_kline(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    match crate::database::operations::get_kline_data(state.database.pool(), &address, chain_id, &interval, limit).await {
+    match TradingOperations::get_kline_data(state.database.pool(), &address, chain_id, &interval, limit).await {
         Ok(klines) => Ok(Json(klines)),
         Err(e) => {
             tracing::error!("Failed to get kline data: {}", e);
@@ -99,7 +100,7 @@ pub async fn get_timeseries(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    match crate::database::operations::get_timeseries_data(state.database.pool(), &address, chain_id, hours).await {
+    match TradingOperations::get_timeseries_data(state.database.pool(), &address, chain_id, hours).await {
         Ok(timeseries) => Ok(Json(timeseries)),
         Err(e) => {
             tracing::error!("Failed to get timeseries data: {}", e);
@@ -116,7 +117,7 @@ pub async fn get_pair_trades(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
-    match crate::database::operations::get_pair_trades(state.database.pool(), &address, chain_id, limit, offset).await {
+    match TradingOperations::get_pair_trades(state.database.pool(), &address, chain_id, limit, offset).await {
         Ok(trades) => Ok(Json(trades)),
         Err(e) => {
             tracing::error!("Failed to get pair trades: {}", e);
@@ -133,7 +134,7 @@ pub async fn get_pair_liquidity(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
-    match crate::database::operations::get_pair_liquidity_events(state.database.pool(), &address, chain_id, limit, offset).await {
+    match TradingOperations::get_pair_liquidity_events(state.database.pool(), &address, chain_id, limit, offset).await {
         Ok(liquidity) => Ok(Json(liquidity)),
         Err(e) => {
             tracing::error!("Failed to get pair liquidity: {}", e);
@@ -146,7 +147,7 @@ pub async fn get_pair_stats(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
 ) -> Result<Json<PairStats>, StatusCode> {
-    match crate::database::operations::get_pair_stats(state.database.pool(), &address, chain_id).await {
+    match TradingOperations::get_pair_stats(state.database.pool(), &address, chain_id).await {
         Ok(Some(stats)) => Ok(Json(stats)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {

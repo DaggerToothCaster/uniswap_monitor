@@ -6,6 +6,7 @@ use axum::{
     response::Json,
 };
 use serde::Deserialize;
+use crate::database::operations::{TokenOperations};
 
 #[derive(Debug, Deserialize)]
 pub struct TokenListQuery {
@@ -33,7 +34,7 @@ pub async fn get_token_list(
     let sort_by = params.sort_by.unwrap_or_else(|| "volume_24h".to_string());
     let order = params.order.unwrap_or_else(|| "desc".to_string());
 
-    match crate::database::operations::get_token_list(
+    match TokenOperations::get_token_list(
         state.database.pool(), 
         params.chain_id, 
         limit, 
@@ -53,7 +54,7 @@ pub async fn get_token_detail(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
 ) -> Result<Json<TokenDetail>, StatusCode> {
-    match crate::database::operations::get_token_detail(state.database.pool(), chain_id, &address).await {
+    match TokenOperations::get_token_detail(state.database.pool(), chain_id, &address).await {
         Ok(Some(detail)) => Ok(Json(detail)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -73,7 +74,7 @@ pub async fn search_tokens(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    match crate::database::operations::search_tokens(
+    match TokenOperations::search_tokens(
         state.database.pool(), 
         &params.q, 
         params.chain_id, 
@@ -93,7 +94,7 @@ pub async fn get_trending_tokens(
 ) -> Result<Json<Vec<TokenListItem>>, StatusCode> {
     let limit = params.limit.unwrap_or(50);
 
-    match crate::database::operations::get_trending_tokens(
+    match TokenOperations::get_trending_tokens(
         state.database.pool(), 
         params.chain_id, 
         limit
@@ -112,7 +113,7 @@ pub async fn get_new_tokens(
 ) -> Result<Json<Vec<TokenListItem>>, StatusCode> {
     let limit = params.limit.unwrap_or(50);
 
-    match crate::database::operations::get_new_tokens(
+    match TokenOperations::get_new_tokens(
         state.database.pool(), 
         params.chain_id, 
         limit

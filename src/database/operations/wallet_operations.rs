@@ -1,10 +1,11 @@
 use crate::database::utils::*;
+use crate::types::*;
 use crate::types::WalletTransaction;
 use anyhow::Result;
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-
+use chrono::{DateTime, Utc};
 pub struct WalletOperations;
 
 impl WalletOperations {
@@ -107,115 +108,85 @@ impl WalletOperations {
 
     pub async fn get_wallet_stats(
         pool: &PgPool,
-        chain_id: Option<i32>,
         wallet_address: &str,
-    ) -> Result<HashMap<String, JsonValue>> {
-        let mut conditions = vec!["(sender = $1 OR to_address = $1)".to_string()];
-        let mut param_count = 1;
+        chain_id: Option<i32>,
+        days: i32,
+    ) -> Result<Option<WalletStats>> {
+        let chain_filter = if let Some(chain_id) = chain_id {
+            format!("AND se.chain_id = {}", chain_id)
+        } else {
+            "".to_string()
+        };
 
-        if chain_id.is_some() {
-            param_count += 1;
-            conditions.push(format!("chain_id = ${}", param_count));
-        }
-
-        let where_clause = conditions.join(" AND ");
-
-        // Query for swap statistics
-        let swap_query = format!(
+        let query = format!(
             r#"
+        WITH wallet_activity AS (
+            SELECT 
+                COUNT(*) as total_transactions,
+                SUM(
+                    CASE 
+                        WHEN se.amount0_in > 0 THEN se.amount0_in
+                        WHEN se.amount1_in > 0 THEN se.amount1_in  
+                        ELSE 0
+                    END
+                ) as total_volume_usd,
+                MIN(se.timestamp) as first_transaction,
+                MAX(se.timestamp) as last_transaction
+            FROM swap_events se
+            WHERE (se.sender = $1 OR se.to_address = $1)
+            AND se.timestamp >= NOW() - INTERVAL '1 day' * $2
+            {}
+        )
         SELECT 
-            COUNT(*) as total_swaps,
-            SUM(COALESCE(volume_usd, 0)) as total_volume,
-            MIN(timestamp) as first_transaction,
-            MAX(timestamp) as last_transaction
-        FROM swap_events 
-        WHERE {}
+            $1 as wallet_address,
+            {} as chain_id,
+            COALESCE(total_transactions, 0) as total_transactions,
+            COALESCE(total_volume_usd, 0) as total_volume_usd,
+            0 as total_fees_paid,
+            0 as profit_loss,
+            0 as win_rate,
+            CASE 
+                WHEN total_transactions > 0 THEN total_volume_usd / total_transactions
+                ELSE 0
+            END as avg_trade_size,
+            first_transaction,
+            last_transaction
+        FROM wallet_activity
         "#,
-            where_clause
+            chain_filter,
+            chain_id
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "NULL".to_string())
         );
 
-        let mut swap_query_builder = sqlx::query(&swap_query).bind(wallet_address);
-        if let Some(chain_id) = chain_id {
-            swap_query_builder = swap_query_builder.bind(chain_id);
+        let row = sqlx::query(&query)
+            .bind(wallet_address)
+            .bind(days)
+            .fetch_optional(pool)
+            .await?;
+
+        if let Some(row) = row {
+            Ok(Some(WalletStats {
+                wallet_address: safe_get_string(&row, "wallet_address"),
+                chain_id: safe_get_optional_i32(&row, "chain_id"),
+                total_transactions: safe_get_i64(&row, "total_transactions"),
+                total_volume_usd: safe_get_decimal(&row, "total_volume_usd"),
+                total_fees_paid: safe_get_decimal(&row, "total_fees_paid"),
+                profit_loss: safe_get_decimal(&row, "profit_loss"),
+                win_rate: safe_get_decimal(&row, "win_rate"),
+                avg_trade_size: safe_get_decimal(&row, "avg_trade_size"),
+                first_transaction: safe_get_optional_datetime(&row, "first_transaction")
+                    .unwrap_or_else(|| Utc::now()),
+                last_transaction: safe_get_optional_datetime(&row, "last_transaction")
+                    .unwrap_or_else(|| Utc::now()),
+            }))
+        } else {
+            Ok(None)
         }
-
-        let swap_row = swap_query_builder.fetch_one(pool).await?;
-
-        // Query for liquidity statistics
-        let liquidity_query = format!(
-            r#"
-        SELECT 
-            COUNT(*) as total_liquidity_ops,
-            COUNT(CASE WHEN event_type = 'Mint' THEN 1 END) as total_adds,
-            COUNT(CASE WHEN event_type = 'Burn' THEN 1 END) as total_removes
-        FROM liquidity_events 
-        WHERE {}
-        "#,
-            where_clause
-        );
-
-        let mut liquidity_query_builder = sqlx::query(&liquidity_query).bind(wallet_address);
-        if let Some(chain_id) = chain_id {
-            liquidity_query_builder = liquidity_query_builder.bind(chain_id);
-        }
-
-        let liquidity_row = liquidity_query_builder.fetch_one(pool).await?;
-
-        let mut stats = HashMap::new();
-        stats.insert(
-            "total_swaps".to_string(),
-            JsonValue::Number(JsonNumber::from(
-                safe_get_optional_i32(&swap_row, "total_swaps").unwrap_or(0),
-            )),
-        );
-        stats.insert(
-            "total_volume".to_string(),
-            JsonValue::String(
-                safe_get_optional_decimal(&swap_row, "total_volume")
-                    .unwrap_or(rust_decimal::Decimal::ZERO)
-                    .to_string(),
-            ),
-        );
-        stats.insert(
-            "total_liquidity_ops".to_string(),
-            JsonValue::Number(JsonNumber::from(
-                safe_get_optional_i32(&liquidity_row, "total_liquidity_ops").unwrap_or(0),
-            )),
-        );
-        stats.insert(
-            "total_adds".to_string(),
-            JsonValue::Number(JsonNumber::from(
-                safe_get_optional_i32(&liquidity_row, "total_adds").unwrap_or(0),
-            )),
-        );
-        stats.insert(
-            "total_removes".to_string(),
-            JsonValue::Number(JsonNumber::from(
-                safe_get_optional_i32(&liquidity_row, "total_removes").unwrap_or(0),
-            )),
-        );
-        stats.insert(
-            "first_transaction".to_string(),
-            JsonValue::String(
-                safe_get_optional_datetime(&swap_row, "first_transaction")
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "null".to_string()),
-            ),
-        );
-        stats.insert(
-            "last_transaction".to_string(),
-            JsonValue::String(
-                safe_get_optional_datetime(&swap_row, "last_transaction")
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "null".to_string()),
-            ),
-        );
-
-        Ok(stats)
     }
     pub async fn get_wallet_portfolio(
         pool: &PgPool,
-        chain_id: i32,
+        chain_id: Option<i32>,
         wallet_address: &str,
     ) -> Result<Vec<HashMap<String, serde_json::Value>>, sqlx::Error> {
         // This is a placeholder implementation
@@ -226,7 +197,7 @@ impl WalletOperations {
 
     pub async fn get_wallet_pnl(
         pool: &PgPool,
-        chain_id: i32,
+        chain_id: Option<i32>,
         wallet_address: &str,
     ) -> Result<HashMap<String, serde_json::Value>, sqlx::Error> {
         // This is a placeholder implementation
