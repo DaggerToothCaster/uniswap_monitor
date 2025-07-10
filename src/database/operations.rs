@@ -410,7 +410,7 @@ pub async fn get_processing_status(pool: &PgPool) -> Result<Vec<ProcessingStatus
     Ok(status)
 }
 
-// 修复后的K线数据查询 - 正确处理价格计算逻辑
+// 优化后的K线数据查询 - 确保开盘价连续性
 pub async fn get_kline_data(
     pool: &PgPool,
     pair_address: &str,
@@ -425,17 +425,11 @@ pub async fn get_kline_data(
             WITH time_series AS (
                 SELECT 
                     date_trunc('minute', timestamp) as time_bucket,
-                    -- 修复价格计算逻辑：统一表示为token1相对于token0的价格
                     CASE 
-                        -- 用token0换token1: amount0_in > 0, amount1_out > 0
-                        -- 价格 = amount0_in / amount1_out (多少token0换1个token1)
                         WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        -- 用token1换token0: amount1_in > 0, amount0_out > 0  
-                        -- 价格 = amount0_out / amount1_in (1个token1换多少token0，需要取倒数)
                         WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
                         ELSE 0
                     END as price,
-                    -- 成交量计算：使用输入的token数量作为成交量
                     CASE 
                         WHEN amount0_in > 0 THEN amount0_in
                         WHEN amount1_in > 0 THEN amount1_in  
@@ -452,10 +446,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -464,6 +458,40 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    -- 确保最高价不低于开盘价和收盘价
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    -- 确保最低价不高于开盘价和收盘价
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -473,8 +501,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -506,10 +533,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -518,6 +545,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -527,8 +586,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -560,10 +618,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -572,6 +630,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -581,8 +671,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -614,10 +703,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -626,6 +715,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -635,8 +756,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -668,10 +788,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -680,6 +800,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -689,8 +841,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -722,10 +873,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -734,6 +885,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -743,8 +926,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -776,10 +958,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -788,6 +970,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -797,8 +1011,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -830,10 +1043,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -842,6 +1055,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -851,8 +1096,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -884,10 +1128,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -896,6 +1140,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -905,8 +1181,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -937,10 +1212,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -949,6 +1224,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -958,8 +1265,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
@@ -992,10 +1298,10 @@ pub async fn get_kline_data(
                     (amount1_in > 0 AND amount0_out > 0)
                 )
             ),
-            kline_aggregated AS (
+            kline_raw AS (
                 SELECT 
                     time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as open_price,
+                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
                     MAX(price) as high_price,
                     MIN(price) as low_price,
                     MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
@@ -1004,6 +1310,38 @@ pub async fn get_kline_data(
                 FROM time_series
                 WHERE price > 0
                 GROUP BY time_bucket
+            ),
+            kline_with_continuity AS (
+                SELECT 
+                    time_bucket,
+                    CASE 
+                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                        THEN first_price 
+                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                    END as open_price,
+                    GREATEST(
+                        high_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as high_price,
+                    LEAST(
+                        low_price,
+                        CASE 
+                            WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
+                            THEN first_price 
+                            ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                        END,
+                        close_price
+                    ) as low_price,
+                    close_price,
+                    total_volume,
+                    trade_count
+                FROM kline_raw
+                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
             )
             SELECT 
                 time_bucket as timestamp,
@@ -1013,8 +1351,7 @@ pub async fn get_kline_data(
                 COALESCE(close_price, 0) as close,
                 COALESCE(total_volume, 0) as volume,
                 COALESCE(trade_count, 0) as trade_count
-            FROM kline_aggregated
-            WHERE open_price IS NOT NULL AND close_price IS NOT NULL
+            FROM kline_with_continuity
             ORDER BY time_bucket DESC
             LIMIT $3
             "#,
