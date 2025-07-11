@@ -1,5 +1,4 @@
 use crate::types::*;
-use crate::database::utils::*;
 use anyhow::Result;
 use sqlx::PgPool;
 
@@ -21,18 +20,20 @@ impl SystemOperations {
                 token1_decimals INTEGER,
                 block_number BIGINT NOT NULL,
                 transaction_hash VARCHAR(66) NOT NULL,
-                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, address)
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (chain_id, address),
+                CONSTRAINT valid_token_pair CHECK (token0 < token1)
             )
             "#
         )
         .execute(pool)
         .await?;
 
-        // Create swap_events table
+        // Create swap_events table with foreign key
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS swap_events (
+                id SERIAL PRIMARY KEY,
                 chain_id INTEGER NOT NULL,
                 pair_address VARCHAR(42) NOT NULL,
                 sender VARCHAR(42) NOT NULL,
@@ -43,47 +44,56 @@ impl SystemOperations {
                 to_address VARCHAR(42) NOT NULL,
                 price DECIMAL(36, 18),
                 volume_usd DECIMAL(36, 18),
-                trade_type VARCHAR(10),
+                trade_type VARCHAR(10) NOT NULL,
                 block_number BIGINT NOT NULL,
                 transaction_hash VARCHAR(66) NOT NULL,
+                log_index INTEGER NOT NULL,
                 timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, transaction_hash, pair_address)
+                FOREIGN KEY (chain_id, pair_address) 
+                REFERENCES trading_pairs(chain_id, address)
+                ON DELETE CASCADE,
+                UNIQUE (chain_id, transaction_hash, log_index)
             )
             "#
         )
         .execute(pool)
         .await?;
 
-        // Create liquidity_events table
+        // Create liquidity_events table with improved schema
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS liquidity_events (
+                id SERIAL PRIMARY KEY,
                 chain_id INTEGER NOT NULL,
                 pair_address VARCHAR(42) NOT NULL,
                 sender VARCHAR(42) NOT NULL,
                 amount0 DECIMAL(78, 0) NOT NULL,
                 amount1 DECIMAL(78, 0) NOT NULL,
-                to_address VARCHAR(42),
+                to_address VARCHAR(42) NOT NULL,
                 event_type VARCHAR(10) NOT NULL,
                 block_number BIGINT NOT NULL,
                 transaction_hash VARCHAR(66) NOT NULL,
+                log_index INTEGER NOT NULL,
                 timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, transaction_hash, pair_address, event_type)
+                FOREIGN KEY (chain_id, pair_address) 
+                REFERENCES trading_pairs(chain_id, address)
+                ON DELETE CASCADE,
+                UNIQUE (chain_id, transaction_hash, log_index, event_type)
             )
             "#
         )
         .execute(pool)
         .await?;
 
-        // Create token_metadata table
+        // Create token_metadata table with improved constraints
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS token_metadata (
                 chain_id INTEGER NOT NULL,
                 address VARCHAR(42) NOT NULL,
-                name VARCHAR(100),
-                symbol VARCHAR(20),
-                decimals INTEGER,
+                name VARCHAR(100) NOT NULL,
+                symbol VARCHAR(20) NOT NULL,
+                decimals INTEGER NOT NULL,
                 total_supply DECIMAL(78, 0),
                 description TEXT,
                 website VARCHAR(255),
@@ -91,12 +101,13 @@ impl SystemOperations {
                 telegram VARCHAR(255),
                 discord VARCHAR(255),
                 logo_url VARCHAR(500),
-                is_verified BOOLEAN DEFAULT FALSE,
-                verification_level INTEGER DEFAULT 0,
-                tags TEXT[],
+                is_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                verification_level INTEGER NOT NULL DEFAULT 0,
+                tags TEXT[] DEFAULT '{}',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, address)
+                PRIMARY KEY (chain_id, address),
+                CONSTRAINT valid_decimals CHECK (decimals BETWEEN 0 AND 36)
             )
             "#
         )
@@ -111,7 +122,8 @@ impl SystemOperations {
                 contract_type VARCHAR(50) NOT NULL,
                 last_block_number BIGINT NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, contract_type)
+                PRIMARY KEY (chain_id, contract_type),
+                CONSTRAINT valid_block_number CHECK (last_block_number >= 0)
             )
             "#
         )
@@ -121,80 +133,102 @@ impl SystemOperations {
         Ok(())
     }
 
-    pub async fn create_indexes(pool: &PgPool) -> Result<(), sqlx::Error> {
+    pub async fn create_indexes(pool: &PgPool) -> Result<()> {
         // Indexes for trading_pairs
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_trading_pairs_timestamp ON trading_pairs(timestamp DESC)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_trading_pairs_tokens ON trading_pairs(token0, token1)")
-            .execute(pool).await?;
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_trading_pairs_timestamp ON trading_pairs(created_at DESC)"
+        ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_trading_pairs_tokens ON trading_pairs(chain_id, token0, token1)"
+        ).execute(pool).await?;
 
         // Indexes for swap_events
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_swap_events_pair ON swap_events(chain_id, pair_address)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_swap_events_timestamp ON swap_events(timestamp DESC)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_swap_events_sender ON swap_events(sender)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_swap_events_to ON swap_events(to_address)")
-            .execute(pool).await?;
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_swap_events_pair ON swap_events(chain_id, pair_address)"
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_swap_events_pair_timestamp ON swap_events(chain_id, pair_address, timestamp DESC)"
+        ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_swap_events_sender ON swap_events(chain_id, sender)"
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_swap_events_to ON swap_events(chain_id, to_address)"
+        )
+        .execute(pool)
+        .await?;
+
+    
 
         // Indexes for liquidity_events
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_liquidity_events_pair ON liquidity_events(chain_id, pair_address)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_liquidity_events_timestamp ON liquidity_events(timestamp DESC)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_liquidity_events_sender ON liquidity_events(sender)")
-            .execute(pool).await?;
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_liquidity_events_pair ON liquidity_events(chain_id, pair_address)"
+        ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_liquidity_events_pair_timestamp ON liquidity_events(chain_id, pair_address, timestamp DESC)"
+        ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_liquidity_events_sender ON liquidity_events(chain_id, sender)"
+        ).execute(pool).await?;
 
         // Indexes for token_metadata
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(symbol)")
-            .execute(pool).await?;
-        sqlx::query!("CREATE INDEX IF NOT EXISTS idx_token_metadata_verified ON token_metadata(is_verified)")
-            .execute(pool).await?;
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(chain_id, symbol)"
+        ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_token_metadata_verified ON token_metadata(chain_id, is_verified)"
+        ).execute(pool).await?;
 
         Ok(())
     }
 
     pub async fn create_views(pool: &PgPool) -> Result<(), sqlx::Error> {
-        // Create a view for token statistics
-        sqlx::query!(
-            r#"
-            CREATE OR REPLACE VIEW token_stats AS
-            SELECT 
-                tp.chain_id,
-                COALESCE(tp.token0, tp.token1) as token_address,
-                COALESCE(tp.token0_symbol, tp.token1_symbol) as symbol,
-                COUNT(DISTINCT tp.address) as pair_count,
-                COUNT(se.transaction_hash) as swap_count,
-                SUM(COALESCE(se.volume_usd, 0)) as total_volume,
-                AVG(COALESCE(se.price, 0)) as avg_price,
-                MAX(se.timestamp) as last_trade
-            FROM trading_pairs tp
-            LEFT JOIN swap_events se ON tp.chain_id = se.chain_id AND tp.address = se.pair_address
-            GROUP BY tp.chain_id, COALESCE(tp.token0, tp.token1), COALESCE(tp.token0_symbol, tp.token1_symbol)
-            "#
-        )
-        .execute(pool)
-        .await?;
+        // Create materialized view for token statistics
+        sqlx::query(
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS token_stats_mv AS 
+         SELECT
+             tp.chain_id, 
+             COALESCE(tp.token0, tp.token1) as token_address, 
+             COALESCE(tp.token0_symbol, tp.token1_symbol) as symbol, 
+             COUNT(DISTINCT tp.address) as pair_count, 
+             COUNT(se.transaction_hash) as swap_count, 
+             SUM(COALESCE(se.volume_usd, 0)) as total_volume, 
+             AVG(COALESCE(se.price, 0)) as avg_price, 
+             MAX(se.created_at) as last_trade 
+         FROM trading_pairs tp 
+         LEFT JOIN swap_events se ON tp.chain_id = se.chain_id AND tp.address = se.pair_address 
+         GROUP BY tp.chain_id, COALESCE(tp.token0, tp.token1), COALESCE(tp.token0_symbol, tp.token1_symbol)"
+    )
+    .execute(pool)
+    .await?;
 
-        // Create a view for pair statistics
-        sqlx::query!(
-            r#"
-            CREATE OR REPLACE VIEW pair_stats AS
-            SELECT 
-                tp.chain_id,
-                tp.address as pair_address,
-                tp.token0_symbol,
-                tp.token1_symbol,
-                COUNT(se.transaction_hash) as swap_count,
-                SUM(COALESCE(se.volume_usd, 0)) as total_volume,
-                AVG(COALESCE(se.price, 0)) as avg_price,
-                MIN(se.timestamp) as first_trade,
-                MAX(se.timestamp) as last_trade
-            FROM trading_pairs tp
-            LEFT JOIN swap_events se ON tp.chain_id = se.chain_id AND tp.address = se.pair_address
-            GROUP BY tp.chain_id, tp.address, tp.token0_symbol, tp.token1_symbol
-            "#
+        // Create materialized view for pair statistics
+        sqlx::query(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS pair_stats_mv AS 
+         SELECT 
+             tp.chain_id, 
+             tp.address as pair_address, 
+             tp.token0_symbol, 
+             tp.token1_symbol, 
+             COUNT(se.transaction_hash) as swap_count, 
+             SUM(COALESCE(se.volume_usd, 0)) as total_volume, 
+             AVG(COALESCE(se.price, 0)) as avg_price, 
+             MIN(se.created_at) as first_trade, 
+             MAX(se.created_at) as last_trade 
+         FROM trading_pairs tp 
+         LEFT JOIN swap_events se ON tp.chain_id = se.chain_id AND tp.address = se.pair_address 
+         GROUP BY tp.chain_id, tp.address, tp.token0_symbol, tp.token1_symbol",
         )
         .execute(pool)
         .await?;
@@ -202,24 +236,34 @@ impl SystemOperations {
         Ok(())
     }
 
-    pub async fn health_check(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    pub async fn health_check(pool: &PgPool) -> Result<bool> {
         sqlx::query!("SELECT 1 as health_check")
             .fetch_one(pool)
             .await?;
         Ok(true)
     }
 
-    pub async fn vacuum_analyze(pool: &PgPool) -> Result<(), sqlx::Error> {
-        sqlx::query!("VACUUM ANALYZE trading_pairs")
+    pub async fn vacuum_analyze(pool: &PgPool) -> Result<()> {
+        sqlx::query!("VACUUM (ANALYZE, VERBOSE) trading_pairs")
             .execute(pool)
             .await?;
-        sqlx::query!("VACUUM ANALYZE swap_events")
+        sqlx::query!("VACUUM (ANALYZE, VERBOSE) swap_events")
             .execute(pool)
             .await?;
-        sqlx::query!("VACUUM ANALYZE liquidity_events")
+        sqlx::query!("VACUUM (ANALYZE, VERBOSE) liquidity_events")
             .execute(pool)
             .await?;
-        sqlx::query!("VACUUM ANALYZE token_metadata")
+        sqlx::query!("VACUUM (ANALYZE, VERBOSE) token_metadata")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn refresh_materialized_views(pool: &PgPool) -> Result<()> {
+        sqlx::query!("REFRESH MATERIALIZED VIEW CONCURRENTLY token_stats_mv")
+            .execute(pool)
+            .await?;
+        sqlx::query!("REFRESH MATERIALIZED VIEW CONCURRENTLY pair_stats_mv")
             .execute(pool)
             .await?;
         Ok(())

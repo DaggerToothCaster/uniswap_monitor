@@ -28,7 +28,7 @@ impl StatsOperations {
                     END
                 ), 0) as total_volume_24h,
                 COUNT(DISTINCT CASE 
-                    WHEN se.timestamp >= NOW() - INTERVAL '24 hours' THEN tp.address 
+                    WHEN se.created_at >= NOW() - INTERVAL '24 hours' THEN tp.address 
                 END) as active_pairs_24h
             FROM trading_pairs tp
             LEFT JOIN swap_events se ON se.pair_address = tp.address 

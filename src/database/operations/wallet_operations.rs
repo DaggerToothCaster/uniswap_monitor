@@ -63,7 +63,7 @@ impl WalletOperations {
         FROM swap_events se
         LEFT JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
         WHERE {}
-        ORDER BY se.timestamp DESC
+        ORDER BY se.created_at DESC
         LIMIT ${} OFFSET ${}
         "#,
             where_clause,

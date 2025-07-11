@@ -1,7 +1,7 @@
 pub mod operations;
 pub mod utils;
-use sqlx::PgPool;
 use anyhow::Result;
+use sqlx::PgPool;
 // Re-export operations and utils
 pub use operations::*;
 pub use utils::*;
@@ -20,6 +20,23 @@ impl Database {
     }
 
     pub async fn create_tables(&self) -> Result<()> {
-        SystemOperations::create_tables(&self.pool).await
+        // let (tables, indexes, views) = tokio::join!(
+        //     SystemOperations::create_tables(&self.pool),
+        //     SystemOperations::create_indexes(&self.pool),
+        //     SystemOperations::create_views(&self.pool),
+        // );
+
+        // tables?;
+        // indexes?;
+        // views?;
+        // Ok(())
+        let (tables, indexes) = tokio::join!(
+            SystemOperations::create_tables(&self.pool),
+            SystemOperations::create_indexes(&self.pool),
+        );
+
+        tables?;
+        indexes?;
+        Ok(())
     }
 }

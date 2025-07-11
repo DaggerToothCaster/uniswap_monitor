@@ -235,7 +235,7 @@ impl TokenOperations {
                     ) FROM swap_events se
                      JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
                      WHERE se.chain_id = $1 AND (tp.token0 = $2 OR tp.token1 = $2)
-                     AND se.timestamp >= NOW() - INTERVAL '24 hours'), 0
+                     AND se.created_at >= NOW() - INTERVAL '24 hours'), 0
                 ) as volume_24h
         )
         SELECT 
