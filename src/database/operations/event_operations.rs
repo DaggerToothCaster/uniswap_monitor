@@ -2,10 +2,8 @@ use crate::types::{BurnEvent, LastProcessedBlock, MintEvent, SwapEvent};
 use anyhow::Result;
 use sqlx::PgPool;
 
-// 事件类型常量
-pub const EVENT_TYPE_FACTORY: &str = "factory";
-pub const EVENT_TYPE_SWAP: &str = "swap";
-pub const EVENT_TYPE_UNIFIED: &str = "unified";
+
+
 
 
 pub struct EventOperations;

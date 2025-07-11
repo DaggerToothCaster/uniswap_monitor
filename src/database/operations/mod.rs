@@ -16,6 +16,8 @@ pub use metadata_operations::*;
 pub use system_operations::*;
 
 // Event type constants
-pub const EVENT_TYPE_SWAP: &str = "Swap";
-pub const EVENT_TYPE_MINT: &str = "Mint";
-pub const EVENT_TYPE_BURN: &str = "Burn";
+pub const EVENT_TYPE_SWAP: &str = "swap";
+pub const EVENT_TYPE_MINT: &str = "mint";
+pub const EVENT_TYPE_BURN: &str = "burn";
+pub const EVENT_TYPE_FACTORY: &str = "factory";
+pub const EVENT_TYPE_UNIFIED: &str = "unified";
