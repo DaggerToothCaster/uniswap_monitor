@@ -349,129 +349,89 @@ impl TradingOperations {
         pair_address: &str,
         chain_id: i32,
     ) -> Result<Option<PairStats>> {
-        // 首先获取交易对的代币精度信息
-        let decimals_query = r#"
-        SELECT token0_decimals, token1_decimals 
-        FROM trading_pairs 
-        WHERE address = $1 AND chain_id = $2
-    "#;
-
-        let decimals = sqlx::query(decimals_query)
-            .bind(pair_address)
-            .bind(chain_id)
-            .fetch_optional(pool)
-            .await?;
-
-        let (token0_decimals, token1_decimals) = match decimals {
-            Some(row) => (
-                row.try_get::<i32, _>("token0_decimals").unwrap_or(18),
-                row.try_get::<i32, _>("token1_decimals").unwrap_or(18),
-            ),
-            None => (18, 18), // 默认精度为18
-        };
-
         let query = r#"
-    WITH pair_info AS (
+        WITH pair_info AS (
+            SELECT 
+                tp.address as pair_address,
+                tp.chain_id,
+                tp.token0_symbol,
+                tp.token1_symbol,
+                -- 当前价格
+                COALESCE(
+                    (SELECT 
+                        CASE 
+                            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                            ELSE 0
+                        END
+                     FROM swap_events 
+                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                     AND (
+                         (amount0_in > 0 AND amount1_out > 0) OR 
+                         (amount1_in > 0 AND amount0_out > 0)
+                     )
+                     ORDER BY timestamp DESC 
+                     LIMIT 1), 0
+                ) as current_price,
+                -- 24小时前价格
+                COALESCE(
+                    (SELECT 
+                        CASE 
+                            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                            ELSE 0
+                        END
+                     FROM swap_events 
+                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                     AND timestamp <= NOW() - INTERVAL '24 hours'
+                     AND (
+                         (amount0_in > 0 AND amount1_out > 0) OR 
+                         (amount1_in > 0 AND amount0_out > 0)
+                     )
+                     ORDER BY timestamp DESC 
+                     LIMIT 1), 0
+                ) as price_24h_ago,
+                -- 24小时成交量
+                COALESCE(
+                    (SELECT SUM(
+                        CASE 
+                            WHEN amount0_in > 0 THEN amount0_in
+                            WHEN amount1_in > 0 THEN amount1_in  
+                            ELSE 0
+                        END
+                    ) FROM swap_events 
+                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                     AND timestamp >= NOW() - INTERVAL '24 hours'), 0
+                ) as volume_24h,
+                -- 24小时交易次数
+                COALESCE(
+                    (SELECT COUNT(*) FROM swap_events 
+                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                     AND timestamp >= NOW() - INTERVAL '24 hours'), 0
+                ) as tx_count_24h
+            FROM trading_pairs tp
+            WHERE tp.address = $1 AND tp.chain_id = $2
+        )
         SELECT 
-            tp.address as pair_address,
-            tp.chain_id,
-            tp.token0_symbol,
-            tp.token1_symbol,
-            -- 当前价格
-            COALESCE(
-                (SELECT 
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END
-                 FROM swap_events 
-                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                 AND (
-                     (amount0_in > 0 AND amount1_out > 0) OR 
-                     (amount1_in > 0 AND amount0_out > 0)
-                 )
-                 ORDER BY timestamp DESC 
-                 LIMIT 1), 0
-            ) as current_price,
-            -- 24小时前价格
-            COALESCE(
-                (SELECT 
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END
-                 FROM swap_events 
-                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                 AND timestamp <= NOW() - INTERVAL '24 hours'
-                 AND (
-                     (amount0_in > 0 AND amount1_out > 0) OR 
-                     (amount1_in > 0 AND amount0_out > 0)
-                 )
-                 ORDER BY timestamp DESC 
-                 LIMIT 1), 0
-            ) as price_24h_ago,
-            -- 24小时成交量(原始值)
-            COALESCE(
-                (SELECT SUM(
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END
-                ) FROM swap_events 
-                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                 AND timestamp >= NOW() - INTERVAL '24 hours'), 0
-            ) as raw_volume_24h,
-            -- 24小时交易次数
-            COALESCE(
-                (SELECT COUNT(*) FROM swap_events 
-                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                 AND timestamp >= NOW() - INTERVAL '24 hours'), 0
-            ) as tx_count_24h,
-            -- 获取最近一次交易使用的代币索引
-            COALESCE(
-                (SELECT 
-                    CASE 
-                        WHEN amount0_in > 0 THEN 0  
-                        WHEN amount1_in > 0 THEN 1  
-                        ELSE -1
-                    END
-                 FROM swap_events 
-                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                 ORDER BY timestamp DESC 
-                 LIMIT 1), -1
-            ) as last_token_index
-        FROM trading_pairs tp
-        WHERE tp.address = $1 AND tp.chain_id = $2
-    )
-    SELECT 
-        pair_address,
-        chain_id,
-        COALESCE(token0_symbol, 'UNKNOWN') as token0_symbol,
-        COALESCE(token1_symbol, 'UNKNOWN') as token1_symbol,
-        current_price as price,
-        CASE 
-            WHEN last_token_index = 0 THEN raw_volume_24h / power(10, $3)
-            WHEN last_token_index = 1 THEN raw_volume_24h / power(10, $4)
-            ELSE raw_volume_24h
-        END as volume_24h,
-        0 as liquidity,
-        CASE 
-            WHEN price_24h_ago > 0 THEN 
-                ((current_price - price_24h_ago) / price_24h_ago) * 100
-            ELSE 0
-        END as price_change_24h,
-        tx_count_24h
-    FROM pair_info
+            pair_address,
+            chain_id,
+            COALESCE(token0_symbol, 'UNKNOWN') as token0_symbol,
+            COALESCE(token1_symbol, 'UNKNOWN') as token1_symbol,
+            current_price as price,
+            volume_24h,
+            0 as liquidity,
+            CASE 
+                WHEN price_24h_ago > 0 THEN 
+                    ((current_price - price_24h_ago) / price_24h_ago) * 100
+                ELSE 0
+            END as price_change_24h,
+            tx_count_24h
+        FROM pair_info
     "#;
 
         let row = sqlx::query(query)
             .bind(pair_address)
             .bind(chain_id)
-            .bind(token0_decimals)
-            .bind(token1_decimals)
             .fetch_optional(pool)
             .await?;
 
@@ -482,7 +442,7 @@ impl TradingOperations {
                 token0_symbol: safe_get_string(&row, "token0_symbol"),
                 token1_symbol: safe_get_string(&row, "token1_symbol"),
                 price: safe_get_decimal(&row, "price"),
-                volume_24h: safe_get_decimal(&row, "volume_24h").round_dp(0), // 四舍五入到整数
+                volume_24h: safe_get_decimal(&row, "volume_24h"),
                 liquidity: safe_get_decimal(&row, "liquidity"),
                 price_change_24h: safe_get_decimal(&row, "price_change_24h"),
                 tx_count_24h: safe_get_i64(&row, "tx_count_24h"),
@@ -492,7 +452,6 @@ impl TradingOperations {
         }
     }
 
-    
     // K线数据查询 - 正确处理价格计算逻辑
     pub async fn get_kline_data(
         pool: &PgPool,
