@@ -5,6 +5,8 @@ use crate::types::{
 use anyhow::Result;
 use sqlx::{PgPool, Row};
 use tracing::info;
+use rust_decimal::Decimal;
+
 pub struct TradingOperations;
 
 impl TradingOperations {
@@ -1262,34 +1264,60 @@ impl TradingOperations {
         chain_id: i32,
         hours: i32,
     ) -> Result<Vec<TimeSeriesData>> {
+        // 首先获取交易对的代币精度信息
+        let decimals_query = r#"
+    SELECT token0_decimals, token1_decimals 
+    FROM trading_pairs 
+    WHERE address = $1 AND chain_id = $2
+    "#;
+
+        let decimals = sqlx::query(decimals_query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .fetch_optional(pool)
+            .await?;
+
+        let (token0_decimals, token1_decimals) = match decimals {
+            Some(row) => (
+                row.try_get::<i32, _>("token0_decimals").unwrap_or(18),
+                row.try_get::<i32, _>("token1_decimals").unwrap_or(18),
+            ),
+            None => (18, 18), // 默认精度为18
+        };
+
         let query = r#"
-        SELECT 
-            timestamp,
-            CASE 
-                WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                ELSE 0
-            END as price,
-            CASE 
-                WHEN amount0_in > 0 THEN amount0_in
-                WHEN amount1_in > 0 THEN amount1_in  
-                ELSE 0
-            END as volume
-        FROM swap_events 
-        WHERE pair_address = $1 AND chain_id = $2
-        AND timestamp >= NOW() - INTERVAL '1 hour' * $3
-        AND (
-            (amount0_in > 0 AND amount1_out > 0) OR 
-            (amount1_in > 0 AND amount0_out > 0)
-        )
-        AND (
-            CASE 
-                WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                ELSE 0
-            END
-        ) > 0
-        ORDER BY timestamp ASC
+    SELECT 
+        timestamp,
+        CASE 
+            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+            ELSE 0
+        END as price,
+        CASE 
+            WHEN amount0_in > 0 THEN amount0_in
+            WHEN amount1_in > 0 THEN amount1_in  
+            ELSE 0
+        END as raw_volume,
+        CASE 
+            WHEN amount0_in > 0 THEN 0  
+            WHEN amount1_in > 0 THEN 1  
+            ELSE -1
+        END as volume_token_index
+    FROM swap_events 
+    WHERE pair_address = $1 AND chain_id = $2
+    AND timestamp >= NOW() - INTERVAL '1 hour' * $3
+    AND (
+        (amount0_in > 0 AND amount1_out > 0) OR 
+        (amount1_in > 0 AND amount0_out > 0)
+    )
+    AND (
+        CASE 
+            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+            ELSE 0
+        END
+    ) > 0
+    ORDER BY timestamp ASC
     "#;
 
         let rows = sqlx::query(query)
@@ -1301,10 +1329,22 @@ impl TradingOperations {
 
         let mut timeseries = Vec::new();
         for row in rows {
+            let raw_volume = safe_get_decimal(&row, "raw_volume");
+            let token_index = row.get::<i32, _>("volume_token_index");
+
+            // 根据交易使用的代币去除精度
+            let volume = if token_index == 0 {
+                raw_volume / Decimal::from(10u64.pow(token0_decimals as u32))
+            } else if token_index == 1 {
+                raw_volume / Decimal::from(10u64.pow(token1_decimals as u32))
+            } else {
+                Decimal::ZERO
+            };
+
             timeseries.push(TimeSeriesData {
                 timestamp: safe_get_datetime(&row, "timestamp"),
                 price: safe_get_decimal(&row, "price"),
-                volume: safe_get_decimal(&row, "volume"),
+                volume: volume.round_dp(0), // 四舍五入到整数
             });
         }
 
