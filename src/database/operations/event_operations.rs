@@ -2,10 +2,6 @@ use crate::types::{BurnEvent, LastProcessedBlock, MintEvent, SwapEvent};
 use anyhow::Result;
 use sqlx::PgPool;
 
-
-
-
-
 pub struct EventOperations;
 
 impl EventOperations {
@@ -33,10 +29,11 @@ impl EventOperations {
 
     pub async fn insert_swap_event(pool: &PgPool, event: &SwapEvent) -> Result<(), sqlx::Error> {
         sqlx::query(
-        r#"
+            r#"
         INSERT INTO swap_events 
-        (chain_id, pair_address, sender, amount0_in, amount1_in, amount0_out, amount1_out, to_address, block_number, transaction_hash, log_index,
-        amount1_in, amount0_out, amount1_out, to_address, block_number, transaction_hash, log_index, timestamp)
+        (chain_id, pair_address, sender, amount0_in, amount1_in, 
+         amount0_out, amount1_out, to_address, block_number, 
+         transaction_hash, log_index, timestamp)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (chain_id, transaction_hash, log_index) DO NOTHING
         "#,

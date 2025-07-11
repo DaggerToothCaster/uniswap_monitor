@@ -299,6 +299,7 @@ impl SwapEventListener {
                 );
             }
             Err(e) => {
+                debug!("error:{}",e);
                 // Try manual parsing as fallback
                 match self.parse_swap_event_manually(&log) {
                     Ok((sender, amount0_in, amount1_in, amount0_out, amount1_out, to)) => {
