@@ -1,4 +1,5 @@
 use super::super::ApiState;
+use crate::database::operations::TradingOperations;
 use crate::types::*;
 use axum::{
     extract::{Path, Query, State},
@@ -6,7 +7,7 @@ use axum::{
     response::Json,
 };
 use serde::Deserialize;
-use crate::database::operations::{TradingOperations};
+use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct KlineQuery {
@@ -55,13 +56,14 @@ pub async fn get_pairs(
 pub async fn get_pair_detail(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
-) -> Result<Json<PairDetail>, StatusCode> {
+) -> Result<Json<PairDetail>, (StatusCode, String)> {
     match TradingOperations::get_pair_detail(state.database.pool(), &address, chain_id).await {
         Ok(Some(detail)) => Ok(Json(detail)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Pair not found".to_string())),
         Err(e) => {
-            tracing::error!("Failed to get pair detail: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Database error: {}", e);
+            tracing::error!("{}", error_msg);
+            Err((StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -79,7 +81,15 @@ pub async fn get_kline(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    match TradingOperations::get_kline_data(state.database.pool(), &address, chain_id, &interval, limit).await {
+    match TradingOperations::get_kline_data(
+        state.database.pool(),
+        &address,
+        chain_id,
+        &interval,
+        limit,
+    )
+    .await
+    {
         Ok(klines) => Ok(Json(klines)),
         Err(e) => {
             tracing::error!("Failed to get kline data: {}", e);
@@ -96,11 +106,14 @@ pub async fn get_timeseries(
     let hours = params.hours.unwrap_or(24);
 
     // 限制查询范围
-    if hours > 168 { // 最多7天
+    if hours > 168 {
+        // 最多7天
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    match TradingOperations::get_timeseries_data(state.database.pool(), &address, chain_id, hours).await {
+    match TradingOperations::get_timeseries_data(state.database.pool(), &address, chain_id, hours)
+        .await
+    {
         Ok(timeseries) => Ok(Json(timeseries)),
         Err(e) => {
             tracing::error!("Failed to get timeseries data: {}", e);
@@ -117,7 +130,15 @@ pub async fn get_pair_trades(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
-    match TradingOperations::get_pair_trades(state.database.pool(), &address, chain_id, limit, offset).await {
+    match TradingOperations::get_pair_trades(
+        state.database.pool(),
+        &address,
+        chain_id,
+        limit,
+        offset,
+    )
+    .await
+    {
         Ok(trades) => Ok(Json(trades)),
         Err(e) => {
             tracing::error!("Failed to get pair trades: {}", e);
@@ -134,7 +155,15 @@ pub async fn get_pair_liquidity(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
-    match TradingOperations::get_pair_liquidity_events(state.database.pool(), &address, chain_id, limit, offset).await {
+    match TradingOperations::get_pair_liquidity_events(
+        state.database.pool(),
+        &address,
+        chain_id,
+        limit,
+        offset,
+    )
+    .await
+    {
         Ok(liquidity) => Ok(Json(liquidity)),
         Err(e) => {
             tracing::error!("Failed to get pair liquidity: {}", e);
@@ -159,5 +188,8 @@ pub async fn get_pair_stats(
 
 // 辅助函数：验证时间区间参数
 fn is_valid_interval(interval: &str) -> bool {
-    matches!(interval, "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "1w" | "1M" | "1y")
+    matches!(
+        interval,
+        "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d" | "1w" | "1M" | "1y"
+    )
 }

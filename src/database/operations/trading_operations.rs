@@ -4,9 +4,12 @@ use crate::types::{
 };
 use anyhow::Result;
 use sqlx::{PgPool, Row};
+use tracing::info;
 pub struct TradingOperations;
 
 impl TradingOperations {
+    /// 插入交易对（由事件服务触发）
+    ///
     pub async fn insert_trading_pair(pool: &PgPool, pair: &TradingPair) -> Result<()> {
         sqlx::query(
         r#"
@@ -52,83 +55,178 @@ impl TradingOperations {
         pool: &PgPool,
         pair_address: &str,
         chain_id: i32,
-    ) -> Result<Option<PairDetail>> {
+    ) -> Result<Option<PairDetail>, sqlx::Error> {
+        info!("get_pair_stats");
         let query = r#"
-        WITH pair_stats AS (
+        WITH pair_base AS (
             SELECT 
-                tp.*,
+                tp.id,
+                tp.chain_id,
+                tp.address,
+                tp.token0,
+                tp.token1,
+                tp.token0_symbol,
+                tp.token1_symbol,
+                tp.token0_name,
+                tp.token1_name,
+                tp.token0_decimals,
+                tp.token1_decimals,
+                tp.created_at,
+                tp.block_number,
+                tp.transaction_hash
+            FROM trading_pairs tp
+            WHERE tp.address = $1 AND tp.chain_id = $2
+        ),
+        price_stats AS (
+            SELECT 
+                -- 当前价格 (最新交易价格)
                 COALESCE(
                     (SELECT 
                         CASE 
-                            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                            WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                                se.amount0_in::decimal / NULLIF(se.amount1_out::decimal, 0)
+                            WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 
+                                se.amount0_out::decimal / NULLIF(se.amount1_in::decimal, 0)
                             ELSE 0
                         END
-                     FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                     FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
                      AND (
-                         (amount0_in > 0 AND amount1_out > 0) OR 
-                         (amount1_in > 0 AND amount0_out > 0)
+                         (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+                         (se.amount1_in > 0 AND se.amount0_out > 0)
                      )
-                     ORDER BY timestamp DESC 
+                     ORDER BY se.timestamp DESC 
                      LIMIT 1), 0
                 ) as current_price,
+                -- 24小时前价格
+                COALESCE(
+                    (SELECT 
+                        CASE 
+                            WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                                se.amount0_in::decimal / NULLIF(se.amount1_out::decimal, 0)
+                            WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 
+                                se.amount0_out::decimal / NULLIF(se.amount1_in::decimal, 0)
+                            ELSE 0
+                        END
+                     FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
+                     AND se.timestamp <= NOW() - INTERVAL '24 hours'
+                     AND (
+                         (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+                         (se.amount1_in > 0 AND se.amount0_out > 0)
+                     )
+                     ORDER BY se.timestamp DESC 
+                     LIMIT 1), 0
+                ) as price_24h_ago,
+                -- 7天前价格
+                COALESCE(
+                    (SELECT 
+                        CASE 
+                            WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                                se.amount0_in::decimal / NULLIF(se.amount1_out::decimal, 0)
+                            WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 
+                                se.amount0_out::decimal / NULLIF(se.amount1_in::decimal, 0)
+                            ELSE 0
+                        END
+                     FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
+                     AND se.timestamp <= NOW() - INTERVAL '7 days'
+                     AND (
+                         (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+                         (se.amount1_in > 0 AND se.amount0_out > 0)
+                     )
+                     ORDER BY se.timestamp DESC 
+                     LIMIT 1), 0
+                ) as price_7d_ago
+        ),
+        volume_stats AS (
+            SELECT 
+                -- 24小时成交量 (以token0计算)
                 COALESCE(
                     (SELECT SUM(
                         CASE 
-                            WHEN amount0_in > 0 THEN amount0_in
-                            WHEN amount1_in > 0 THEN amount1_in  
+                            WHEN se.amount0_in > 0 THEN se.amount0_in::decimal
+                            WHEN se.amount0_out > 0 THEN se.amount0_out::decimal
                             ELSE 0
                         END
-                    ) FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND timestamp >= NOW() - INTERVAL '24 hours'), 0
+                    ) FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
+                     AND se.timestamp >= NOW() - INTERVAL '24 hours'), 0
                 ) as volume_24h,
+                -- 7天成交量
                 COALESCE(
                     (SELECT SUM(
                         CASE 
-                            WHEN amount0_in > 0 THEN amount0_in
-                            WHEN amount1_in > 0 THEN amount1_in  
+                            WHEN se.amount0_in > 0 THEN se.amount0_in::decimal
+                            WHEN se.amount0_out > 0 THEN se.amount0_out::decimal
                             ELSE 0
                         END
-                    ) FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND timestamp >= NOW() - INTERVAL '7 days'), 0
-                ) as volume_7d,
+                    ) FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
+                     AND se.timestamp >= NOW() - INTERVAL '7 days'), 0
+                ) as volume_7d
+        ),
+        tx_stats AS (
+            SELECT 
+                -- 24小时交易次数
                 COALESCE(
-                    (SELECT COUNT(*) FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND timestamp >= NOW() - INTERVAL '24 hours'), 0
+                    (SELECT COUNT(*) FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
+                     AND se.timestamp >= NOW() - INTERVAL '24 hours'), 0
                 ) as tx_count_24h,
+                -- 7天交易次数
                 COALESCE(
-                    (SELECT COUNT(*) FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND timestamp >= NOW() - INTERVAL '7 days'), 0
+                    (SELECT COUNT(*) FROM swap_events se 
+                     WHERE se.pair_address = $1 AND se.chain_id = $2
+                     AND se.timestamp >= NOW() - INTERVAL '7 days'), 0
                 ) as tx_count_7d
-            FROM trading_pairs tp
-            WHERE tp.address = $1 AND tp.chain_id = $2
+        ),
+        liquidity_stats AS (
+            SELECT 
+                -- 流动性估算 (基于最近的mint事件)
+                COALESCE(
+                    (SELECT SUM(me.amount0::decimal + me.amount1::decimal) 
+                     FROM mint_events me 
+                     WHERE me.pair_address = $1 AND me.chain_id = $2), 0
+                ) - COALESCE(
+                    (SELECT SUM(be.amount0::decimal + be.amount1::decimal) 
+                     FROM burn_events be 
+                     WHERE be.pair_address = $1 AND be.chain_id = $2), 0
+                ) as liquidity
         )
         SELECT 
-            address as pair_address,
-            chain_id,
-            token0,
-            token1,
-            token0_symbol,
-            token1_symbol,
-            token0_name,
-            token1_name,
-            token0_decimals,
-            token1_decimals,
-            current_price,
-            volume_24h,
-            volume_7d,
-            0 as liquidity,
-            0 as price_change_24h,
-            0 as price_change_7d,
-            tx_count_24h,
-            tx_count_7d,
-            created_at
-        FROM pair_stats
+            pb.address as pair_address,
+            pb.chain_id,
+            pb.token0,
+            pb.token1,
+            pb.token0_symbol,
+            pb.token1_symbol,
+            pb.token0_name,
+            pb.token1_name,
+            pb.token0_decimals,
+            pb.token1_decimals,
+            ps.current_price,
+            vs.volume_24h,
+            vs.volume_7d,
+            ls.liquidity,
+            CASE 
+                WHEN ps.price_24h_ago > 0 THEN 
+                    ((ps.current_price - ps.price_24h_ago) / ps.price_24h_ago) * 100
+                ELSE 0
+            END as price_change_24h,
+            CASE 
+                WHEN ps.price_7d_ago > 0 THEN 
+                    ((ps.current_price - ps.price_7d_ago) / ps.price_7d_ago) * 100
+                ELSE 0
+            END as price_change_7d,
+            ts.tx_count_24h,
+            ts.tx_count_7d,
+            pb.created_at
+        FROM pair_base pb
+        CROSS JOIN price_stats ps
+        CROSS JOIN volume_stats vs
+        CROSS JOIN tx_stats ts
+        CROSS JOIN liquidity_stats ls
     "#;
 
         let row = sqlx::query(query)
@@ -203,7 +301,7 @@ impl TradingOperations {
         FROM swap_events se
         LEFT JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
         WHERE se.pair_address = $1 AND se.chain_id = $2
-        ORDER BY se.created_at DESC
+        ORDER BY se.timestamp DESC
         LIMIT $3 OFFSET $4
     "#;
 
