@@ -1,6 +1,6 @@
 use crate::database::metadata_operations::MetadataOperations;
 use crate::database::utils::*;
-use crate::types::{TokenDetail, TokenListItem, TokenMetadata,TokenPriceInfo,TradingPairInfo};
+use crate::types::{TokenDetail, TokenListItem, TokenMetadata, TokenPriceInfo, TradingPairInfo};
 use anyhow::Result;
 use sqlx::{postgres::PgRow, PgPool, Row};
 use std::collections::HashMap;
@@ -20,12 +20,33 @@ impl TokenOperations {
             _ => "DESC",
         };
 
-        let sort_column = match sort_by {
+        // 定义排序表达式而不是列名
+        let sort_expression = match sort_by {
             "price" => "current_price",
-            "volume" => "volume_24h",
+            "volume" => {
+                r#"(SELECT SUM(
+                        CASE 
+                            WHEN amount0_in > 0 THEN amount0_in
+                            WHEN amount1_in > 0 THEN amount1_in  
+                            ELSE 0
+                        END
+                    ) FROM swap_events 
+                     WHERE pair_address = ts.pair_address AND chain_id = ts.chain_id
+                     AND timestamp >= NOW() - INTERVAL '24 hours')"#
+            }
             "market_cap" => "market_cap",
             "liquidity" => "total_liquidity",
-            _ => "volume_24h",
+            _ => {
+                r#"(SELECT SUM(
+                        CASE 
+                            WHEN amount0_in > 0 THEN amount0_in
+                            WHEN amount1_in > 0 THEN amount1_in  
+                            ELSE 0
+                        END
+                    ) FROM swap_events 
+                     WHERE pair_address = ts.pair_address AND chain_id = ts.chain_id
+                     AND timestamp >= NOW() - INTERVAL '24 hours')"#
+            }
         };
 
         let chain_filter = if let Some(chain_id) = chain_id {
@@ -36,94 +57,106 @@ impl TokenOperations {
 
         let query = format!(
             r#"
-        WITH token_stats AS (
-            SELECT 
-                ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(volume_24h), 0) DESC) as rank,
-                tp.chain_id,
-                CASE 
-                    WHEN tp.chain_id = 1 THEN 'Ethereum'
-                    WHEN tp.chain_id = 56 THEN 'BSC'
-                    WHEN tp.chain_id = 137 THEN 'Polygon'
-                    WHEN tp.chain_id = 42161 THEN 'Arbitrum'
-                    ELSE 'Unknown'
-                END as chain_name,
-                tp.address as pair_address,
-                COALESCE(tp.token0_symbol, 'UNKNOWN') as token0_symbol,
-                COALESCE(tp.token1_symbol, 'UNKNOWN') as token1_symbol,
-                COALESCE(tp.token0_name, 'Unknown Token') as token0_name,
-                COALESCE(tp.token1_name, 'Unknown Token') as token1_name,
-                tm0.logo_url as token0_logo_url,
-                tm1.logo_url as token1_logo_url,
-                tm0.website_url as token0_website_url,
-                tm1.website_url as token1_website_url,
-                tm0.explorer_url as token0_explorer_url,
-                tm1.explorer_url as token1_explorer_url,
-                tm0.description as token0_description,
-                tm1.description as token1_description,
-                tm0.tags as token0_tags,
-                tm1.tags as token1_tags,
-                -- 当前价格
-                COALESCE(
-                    (SELECT 
-                        CASE 
-                            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                            ELSE 0
-                        END
-                     FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND (
-                         (amount0_in > 0 AND amount1_out > 0) OR 
-                         (amount1_in > 0 AND amount0_out > 0)
-                     )
-                     ORDER BY timestamp DESC 
-                     LIMIT 1), 0
-                ) as current_price,
-                -- 1小时价格变化
-                0 as price_change_1h,
-                -- 24小时价格变化
-                0 as price_change_24h,
-                -- 1小时成交量
-                COALESCE(
-                    (SELECT SUM(
-                        CASE 
-                            WHEN amount0_in > 0 THEN amount0_in
-                            WHEN amount1_in > 0 THEN amount1_in  
-                            ELSE 0
-                        END
-                    ) FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND timestamp >= NOW() - INTERVAL '1 hour'), 0
-                ) as volume_1h,
-                -- 24小时成交量
-                COALESCE(
-                    (SELECT SUM(
-                        CASE 
-                            WHEN amount0_in > 0 THEN amount0_in
-                            WHEN amount1_in > 0 THEN amount1_in  
-                            ELSE 0
-                        END
-                    ) FROM swap_events 
-                     WHERE pair_address = tp.address AND chain_id = tp.chain_id
-                     AND timestamp >= NOW() - INTERVAL '24 hours'), 0
-                ) as volume_24h,
-                0 as fdv,
-                0 as market_cap,
-                0 as total_liquidity,
-                NOW() as last_updated
-            FROM trading_pairs tp
-            LEFT JOIN token_metadata tm0 ON tm0.chain_id = tp.chain_id AND tm0.address =tp.token0
-            LEFT JOIN token_metadata tm1 ON tm1.chain_id = tp.chain_id AND tm1.address = tp.token1
-            {}
-            GROUP BY tp.chain_id, tp.address, tp.token0_symbol, tp.token1_symbol, tp.token0_name, tp.token1_name,
-                     tm0.logo_url, tm1.logo_url, tm0.website_url, tm1.website_url, tm0.explorer_url, tm1.explorer_url,
-                     tm0.description, tm1.description, tm0.tags, tm1.tags
-        )
-        SELECT * FROM token_stats
-        ORDER BY {} {}
-        LIMIT {} OFFSET {}
-        "#,
-            chain_filter, sort_column, order_clause, limit, offset
+    WITH token_stats AS (
+        SELECT 
+            ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(
+                (SELECT SUM(
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END
+                ) FROM swap_events 
+                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                 AND timestamp >= NOW() - INTERVAL '24 hours')
+            ), 0) DESC) as rank,
+            tp.chain_id,
+            CASE 
+                WHEN tp.chain_id = 1 THEN 'Ethereum'
+                WHEN tp.chain_id = 56 THEN 'BSC'
+                WHEN tp.chain_id = 137 THEN 'Polygon'
+                WHEN tp.chain_id = 42161 THEN 'Arbitrum'
+                WHEN tp.chain_id = 2559 THEN 'Kto'
+                WHEN tp.chain_id = 2643 THEN 'NOS'
+                ELSE 'Unknown'
+            END as chain_name,
+            tp.address as pair_address,
+            COALESCE(tp.token0_symbol, 'UNKNOWN') as token0_symbol,
+            COALESCE(tp.token1_symbol, 'UNKNOWN') as token1_symbol,
+            COALESCE(tp.token0_name, 'Unknown Token') as token0_name,
+            COALESCE(tp.token1_name, 'Unknown Token') as token1_name,
+            tm0.logo_url as token0_logo_url,
+            tm1.logo_url as token1_logo_url,
+            tm0.website_url as token0_website_url,
+            tm1.website_url as token1_website_url,
+            tm0.explorer_url as token0_explorer_url,
+            tm1.explorer_url as token1_explorer_url,
+            tm0.description as token0_description,
+            tm1.description as token1_description,
+            tm0.tags as token0_tags,
+            tm1.tags as token1_tags,
+            -- 当前价格
+            COALESCE(
+                (SELECT 
+                    CASE 
+                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
+                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
+                        ELSE 0
+                    END
+                 FROM swap_events 
+                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                 AND (
+                     (amount0_in > 0 AND amount1_out > 0) OR 
+                     (amount1_in > 0 AND amount0_out > 0)
+                 )
+                 ORDER BY timestamp DESC 
+                 LIMIT 1), 0
+            ) as current_price,
+            -- 1小时价格变化
+            0 as price_change_1h,
+            -- 24小时价格变化
+            0 as price_change_24h,
+            -- 1小时成交量
+            COALESCE(
+                (SELECT SUM(
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END
+                ) FROM swap_events 
+                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                 AND timestamp >= NOW() - INTERVAL '1 hour'), 0
+            ) as volume_1h,
+            -- 24小时成交量
+            COALESCE(
+                (SELECT SUM(
+                    CASE 
+                        WHEN amount0_in > 0 THEN amount0_in
+                        WHEN amount1_in > 0 THEN amount1_in  
+                        ELSE 0
+                    END
+                ) FROM swap_events 
+                 WHERE pair_address = tp.address AND chain_id = tp.chain_id
+                 AND timestamp >= NOW() - INTERVAL '24 hours'), 0
+            ) as volume_24h,
+            0 as fdv,
+            0 as market_cap,
+            0 as total_liquidity,
+            NOW() as last_updated
+        FROM trading_pairs tp
+        LEFT JOIN token_metadata tm0 ON tm0.chain_id = tp.chain_id AND tm0.address = tp.token0
+        LEFT JOIN token_metadata tm1 ON tm1.chain_id = tp.chain_id AND tm1.address = tp.token1
+        {}
+        GROUP BY tp.chain_id, tp.address, tp.token0_symbol, tp.token1_symbol, tp.token0_name, tp.token1_name,
+                 tm0.logo_url, tm1.logo_url, tm0.website_url, tm1.website_url, tm0.explorer_url, tm1.explorer_url,
+                 tm0.description, tm1.description, tm0.tags, tm1.tags
+    )
+    SELECT * FROM token_stats ts
+    ORDER BY {} {}
+    LIMIT {} OFFSET {}
+    "#,
+            chain_filter, sort_expression, order_clause, limit, offset
         );
 
         let rows = sqlx::query(&query).fetch_all(pool).await?;
