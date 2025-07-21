@@ -4,6 +4,8 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 use sqlx::FromRow;
 
+/// 交易对
+/// token0地址字母序小于token1
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct TradingPair {
     pub id: Uuid,

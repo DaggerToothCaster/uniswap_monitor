@@ -7,9 +7,8 @@ pub struct SystemOperations;
 
 impl SystemOperations {
     pub async fn create_tables(pool: &PgPool) -> Result<()> {
-        debug!("开始创建 create_tables");
-
         // Create trading_pairs table
+        // token0地址字母序小于token1
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS trading_pairs (

@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::database::operations::{TradingOperations,EventOperations};
+use crate::database::operations::{EventOperations, TradingOperations};
 
 abigen!(
     UniswapV2Pair,
@@ -102,6 +102,8 @@ impl SwapEventListener {
             let pairs = TradingOperations::get_all_pairs(
                 self.base.database.pool(),
                 Some(self.base.chain_id as i32),
+                None,
+                None,
             )
             .await?;
 
@@ -283,11 +285,7 @@ impl SwapEventListener {
                     timestamp,
                 };
 
-                EventOperations::insert_swap_event(
-                    self.base.database.pool(),
-                    &swap_event,
-                )
-                .await?;
+                EventOperations::insert_swap_event(self.base.database.pool(), &swap_event).await?;
                 let _ = self
                     .base
                     .event_sender
@@ -299,7 +297,7 @@ impl SwapEventListener {
                 );
             }
             Err(e) => {
-                debug!("error:{}",e);
+                debug!("error:{}", e);
                 // Try manual parsing as fallback
                 match self.parse_swap_event_manually(&log) {
                     Ok((sender, amount0_in, amount1_in, amount0_out, amount1_out, to)) => {
@@ -319,11 +317,8 @@ impl SwapEventListener {
                             timestamp,
                         };
 
-                        EventOperations::insert_swap_event(
-                            self.base.database.pool(),
-                            &swap_event,
-                        )
-                        .await?;
+                        EventOperations::insert_swap_event(self.base.database.pool(), &swap_event)
+                            .await?;
                         let _ = self
                             .base
                             .event_sender
@@ -366,8 +361,7 @@ impl SwapEventListener {
             timestamp,
         };
 
-        EventOperations::insert_mint_event(self.base.database.pool(), &mint_event)
-            .await?;
+        EventOperations::insert_mint_event(self.base.database.pool(), &mint_event).await?;
         let _ = self
             .base
             .event_sender
@@ -401,8 +395,7 @@ impl SwapEventListener {
             timestamp,
         };
 
-        EventOperations::insert_burn_event(self.base.database.pool(), &burn_event)
-            .await?;
+        EventOperations::insert_burn_event(self.base.database.pool(), &burn_event).await?;
         let _ = self
             .base
             .event_sender

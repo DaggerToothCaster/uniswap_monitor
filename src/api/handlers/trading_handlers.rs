@@ -39,12 +39,22 @@ pub struct LiquidityQuery {
     pub offset: Option<i32>,
 }
 
-// 交易对相关handlers
+/// 交易对-列表
+/// [chain_id]    链ID
+/// [limit]       每页数量
+/// [offset]      页码
 pub async fn get_pairs(
     Query(params): Query<PairsQuery>,
     State(state): State<ApiState>,
 ) -> Result<Json<Vec<TradingPair>>, StatusCode> {
-    match TradingOperations::get_all_pairs(state.database.pool(), params.chain_id).await {
+    match TradingOperations::get_all_pairs(
+        state.database.pool(),
+        params.chain_id,
+        params.limit,
+        params.offset,
+    )
+    .await
+    {
         Ok(pairs) => Ok(Json(pairs)),
         Err(e) => {
             tracing::error!("Failed to get pairs: {}", e);

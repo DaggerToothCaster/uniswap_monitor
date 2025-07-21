@@ -39,14 +39,30 @@ impl TradingOperations {
         Ok(())
     }
 
-    pub async fn get_all_pairs(pool: &PgPool, chain_id: Option<i32>) -> Result<Vec<TradingPair>> {
+    pub async fn get_all_pairs(
+        pool: &PgPool,
+        chain_id: Option<i32>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<TradingPair>> {
         let query = if let Some(chain_id) = chain_id {
             sqlx::query_as::<_, TradingPair>(
-                "SELECT * FROM trading_pairs WHERE chain_id = $1 ORDER BY created_at DESC",
+                "SELECT * FROM trading_pairs 
+             WHERE chain_id = $1 
+             ORDER BY created_at DESC
+             LIMIT $2 OFFSET $3",
             )
             .bind(chain_id)
+            .bind(limit)
+            .bind(offset)
         } else {
-            sqlx::query_as::<_, TradingPair>("SELECT * FROM trading_pairs ORDER BY created_at DESC")
+            sqlx::query_as::<_, TradingPair>(
+                "SELECT * FROM trading_pairs 
+             ORDER BY created_at DESC
+             LIMIT $1 OFFSET $2",
+            )
+            .bind(limit)
+            .bind(offset)
         };
 
         let pairs = query.fetch_all(pool).await?;
