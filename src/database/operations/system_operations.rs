@@ -1,15 +1,19 @@
 use crate::types::*;
 use anyhow::Result;
 use sqlx::PgPool;
+use tracing::debug;
 
 pub struct SystemOperations;
 
 impl SystemOperations {
     pub async fn create_tables(pool: &PgPool) -> Result<()> {
+        debug!("开始创建 create_tables");
+
         // Create trading_pairs table
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS trading_pairs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 chain_id INTEGER NOT NULL,
                 address VARCHAR(42) NOT NULL,
                 token0 VARCHAR(42) NOT NULL,
@@ -18,11 +22,13 @@ impl SystemOperations {
                 token1_symbol VARCHAR(20),
                 token0_decimals INTEGER,
                 token1_decimals INTEGER,
+                token0_name VARCHAR(20),
+                token1_name VARCHAR(20),
                 block_number BIGINT NOT NULL,
                 transaction_hash VARCHAR(66) NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, address),
-                CONSTRAINT valid_token_pair CHECK (token0 < token1)
+                CONSTRAINT valid_token_pair CHECK (token0 < token1),
+                UNIQUE (chain_id, address)
             )
             "#
         )
@@ -33,7 +39,7 @@ impl SystemOperations {
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS swap_events (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 chain_id INTEGER NOT NULL,
                 pair_address VARCHAR(42) NOT NULL,
                 sender VARCHAR(42) NOT NULL,
@@ -42,17 +48,11 @@ impl SystemOperations {
                 amount0_out DECIMAL(78, 0) NOT NULL,
                 amount1_out DECIMAL(78, 0) NOT NULL,
                 to_address VARCHAR(42) NOT NULL,
-                price DECIMAL(36, 18),
-                volume_usd DECIMAL(36, 18),
-                trade_type VARCHAR(10) NOT NULL,
                 block_number BIGINT NOT NULL,
                 transaction_hash VARCHAR(66) NOT NULL,
                 log_index INTEGER NOT NULL,
-                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                FOREIGN KEY (chain_id, pair_address) 
-                REFERENCES trading_pairs(chain_id, address)
-                ON DELETE CASCADE,
-                UNIQUE (chain_id, transaction_hash, log_index)
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                UNIQUE(chain_id, transaction_hash, log_index)
             )
             "#
         )
@@ -63,7 +63,6 @@ impl SystemOperations {
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS liquidity_events (
-                id SERIAL PRIMARY KEY,
                 chain_id INTEGER NOT NULL,
                 pair_address VARCHAR(42) NOT NULL,
                 sender VARCHAR(42) NOT NULL,
@@ -73,12 +72,11 @@ impl SystemOperations {
                 event_type VARCHAR(10) NOT NULL,
                 block_number BIGINT NOT NULL,
                 transaction_hash VARCHAR(66) NOT NULL,
-                log_index INTEGER NOT NULL,
                 timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 FOREIGN KEY (chain_id, pair_address) 
                 REFERENCES trading_pairs(chain_id, address)
                 ON DELETE CASCADE,
-                UNIQUE (chain_id, transaction_hash, log_index, event_type)
+                UNIQUE (chain_id, transaction_hash, event_type)
             )
             "#
         )
@@ -89,25 +87,29 @@ impl SystemOperations {
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS token_metadata (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 chain_id INTEGER NOT NULL,
                 address VARCHAR(42) NOT NULL,
-                name VARCHAR(100) NOT NULL,
                 symbol VARCHAR(20) NOT NULL,
+                name VARCHAR(100) NOT NULL,
                 decimals INTEGER NOT NULL,
-                total_supply DECIMAL(78, 0),
                 description TEXT,
-                website VARCHAR(255),
-                twitter VARCHAR(255),
-                telegram VARCHAR(255),
-                discord VARCHAR(255),
+                website_url VARCHAR(500),
                 logo_url VARCHAR(500),
-                is_verified BOOLEAN NOT NULL DEFAULT FALSE,
-                verification_level INTEGER NOT NULL DEFAULT 0,
-                tags TEXT[] DEFAULT '{}',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, address),
-                CONSTRAINT valid_decimals CHECK (decimals BETWEEN 0 AND 36)
+                twitter_url VARCHAR(500),
+                telegram_url VARCHAR(500),
+                discord_url VARCHAR(500),
+                github_url VARCHAR(500),
+                explorer_url VARCHAR(500),
+                coingecko_id VARCHAR(100),
+                coinmarketcap_id VARCHAR(100),
+                total_supply DECIMAL,
+                max_supply DECIMAL,
+                is_verified BOOLEAN DEFAULT FALSE,
+                tags JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE(chain_id, address)
             )
             "#
         )
@@ -118,12 +120,56 @@ impl SystemOperations {
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS last_processed_blocks (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 chain_id INTEGER NOT NULL,
-                contract_type VARCHAR(50) NOT NULL,
+                event_type VARCHAR(50) NOT NULL,
                 last_block_number BIGINT NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (chain_id, contract_type),
-                CONSTRAINT valid_block_number CHECK (last_block_number >= 0)
+                CONSTRAINT valid_block_number CHECK (last_block_number >= 0),
+                UNIQUE(chain_id, event_type)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+
+        // 添加 burn_events 表
+        sqlx::query!(
+            r#"
+            CREATE TABLE IF NOT EXISTS burn_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chain_id INTEGER NOT NULL,
+                pair_address VARCHAR(42) NOT NULL,
+                sender VARCHAR(42) NOT NULL,
+                amount0 DECIMAL(78, 0) NOT NULL,
+                amount1 DECIMAL(78, 0) NOT NULL,
+                to_address VARCHAR(42) NOT NULL,
+                block_number BIGINT NOT NULL,
+                transaction_hash VARCHAR(66) NOT NULL,
+                log_index INTEGER NOT NULL,
+                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(chain_id, transaction_hash, log_index)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+
+        // 添加 mint_events 表
+        sqlx::query!(
+            r#"
+            CREATE TABLE IF NOT EXISTS mint_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chain_id INTEGER NOT NULL,
+                pair_address VARCHAR(42) NOT NULL,
+                sender VARCHAR(42) NOT NULL,
+                amount0 DECIMAL(78, 0) NOT NULL,
+                amount1 DECIMAL(78, 0) NOT NULL,
+                block_number BIGINT NOT NULL,
+                transaction_hash VARCHAR(66) NOT NULL,
+                log_index INTEGER NOT NULL,
+                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(chain_id, transaction_hash, log_index)
             )
             "#
         )
@@ -165,8 +211,6 @@ impl SystemOperations {
         )
         .execute(pool)
         .await?;
-
-    
 
         // Indexes for liquidity_events
         sqlx::query!(

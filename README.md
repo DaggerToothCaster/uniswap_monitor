@@ -216,6 +216,42 @@ cargo build --release --bin api-service
 ./target/release/api-service
 ```
 
+### 在MAC上构建Linux运行程序
+1. 确保 musl 工具链完整安装
+```bash
+# 安装 musl 交叉编译器 (使用 Homebrew)
+brew install FiloSottile/musl-cross/musl-cross
+
+# 或者安装更完整的工具链
+brew install x86_64-unknown-linux-musl
+```
+2. 配置 Cargo 正确使用链接器
+编辑或创建 ~/.cargo/config 文件，添加：
+
+```bash
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+ar = "x86_64-linux-musl-ar"
+```
+3. 设置必要的环境变量
+```bash
+# 对于 ring 等加密库特别重要
+export CC_x86_64_unknown_linux_musl="x86_64-linux-musl-gcc"
+export AR_x86_64_unknown_linux_musl="x86_64-linux-musl-ar"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="x86_64-linux-musl-gcc"
+```
+4. 处理特殊 crate (如 ring)
+```bash
+# 为 ring crate 设置特殊环境变量
+export TARGET_CC="x86_64-linux-musl-gcc"
+export TARGET_AR="x86_64-linux-musl-ar"
+export RING_COMLETION="x86_64-unknown-linux-musl"
+```
+5. 清理并重新构建
+```bash
+cargo clean
+cargo build --release --target x86_64-unknown-linux-musl -v
+```
 ## 🔍 监控和日志
 
 服务使用 `tracing` 库进行日志记录。日志级别可以通过 `RUST_LOG` 环境变量控制：
