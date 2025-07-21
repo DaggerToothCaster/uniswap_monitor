@@ -5,6 +5,7 @@ pub mod wallet_operations;
 pub mod stats_operations;
 pub mod metadata_operations;
 pub mod system_operations;
+pub mod price_operations;
 
 // Re-export all operations for backward compatibility
 pub use trading_operations::*;
@@ -14,6 +15,7 @@ pub use wallet_operations::*;
 pub use stats_operations::*;
 pub use metadata_operations::*;
 pub use system_operations::*;
+pub use price_operations::*;
 
 // Event type constants
 pub const EVENT_TYPE_SWAP: &str = "swap";

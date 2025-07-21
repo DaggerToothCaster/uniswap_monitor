@@ -175,6 +175,24 @@ impl SystemOperations {
         .execute(pool)
         .await?;
 
+        // 添加 token_prices 表
+        sqlx::query!(
+            r#"
+            CREATE TABLE IF NOT EXISTS token_prices (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                chain_id INTEGER NOT NULL,
+                token_address VARCHAR(42) NOT NULL,
+                token_symbol VARCHAR(20) NOT NULL,
+                price_usd DECIMAL(36, 18) NOT NULL,
+                source VARCHAR(50) NOT NULL, -- 价格来源，如 'bidacoin', 'coingecko' 等
+                timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+
         Ok(())
     }
 
@@ -232,6 +250,16 @@ impl SystemOperations {
         sqlx::query!(
             "CREATE INDEX IF NOT EXISTS idx_token_metadata_verified ON token_metadata(chain_id, is_verified)"
         ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_token_prices_token ON token_prices(chain_id, token_address);"
+        ).execute(pool).await?;
+
+        sqlx::query!(
+            "CREATE INDEX IF NOT EXISTS idx_token_prices_symbol ON token_prices(token_symbol);"
+        )
+        .execute(pool)
+        .await?;
 
         Ok(())
     }
