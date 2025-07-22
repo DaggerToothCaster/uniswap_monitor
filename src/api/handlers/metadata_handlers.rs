@@ -4,9 +4,10 @@ use crate::types::*;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Json,
+    Json,
 };
 use serde::Deserialize;
+
 
 #[derive(Debug, Deserialize)]
 pub struct TokenMetadataQuery {
@@ -16,24 +17,31 @@ pub struct TokenMetadataQuery {
     pub verified_only: Option<bool>,
 }
 
+use super::ApiResponse;
+
 // Token metadata相关handlers
 pub async fn update_token_metadata(
-    Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
     Json(payload): Json<UpdateTokenMetadata>,
-) -> Result<StatusCode, StatusCode> {
-    match MetadataOperations::update_token_metadata(
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    match MetadataOperations::upsert_token_metadata(
         state.database.pool(),
-        chain_id,
-        &address,
         &payload,
     )
     .await
     {
-        Ok(metadata) => Ok(StatusCode::OK),
+        Ok(Some(metadata)) => Ok(ApiResponse::success(metadata)),
+        Ok(None) => Err(ApiResponse::<()>::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create token metadata".to_string(),
+        )),
         Err(e) => {
-            tracing::error!("Failed to create token metadata: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Database error: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -41,13 +49,20 @@ pub async fn update_token_metadata(
 pub async fn get_token_metadata(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
-) -> Result<Json<TokenMetadata>, StatusCode> {
-    match MetadataOperations::get_token_metadata(state.database.pool(), chain_id, &address).await {
-        Ok(Some(metadata)) => Ok(Json(metadata)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    match MetadataOperations::get_token_metadata(state.database.pool(), chain_id, &address.to_lowercase()).await {
+        Ok(Some(metadata)) => Ok(ApiResponse::success(metadata)),
+        Ok(None) => Err(ApiResponse::<()>::error(
+            StatusCode::NOT_FOUND,
+            "Token metadata not found".to_string(),
+        )),
         Err(e) => {
-            tracing::error!("Failed to get token metadata: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Database error: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -55,8 +70,8 @@ pub async fn get_token_metadata(
 pub async fn delete_token_metadata(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
-) -> Result<StatusCode, StatusCode> {
-    match MetadataOperations::delete_token_metadata(state.database.pool(), chain_id, &address).await
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    match MetadataOperations::delete_token_metadata(state.database.pool(), chain_id, &address.to_lowercase()).await
     {
         Ok(true) => {
             // 发送WebSocket通知
@@ -64,12 +79,18 @@ pub async fn delete_token_metadata(
                 "{{\"type\":\"token_metadata_deleted\",\"data\":{{\"chain_id\":{},\"address\":\"{}\"}}}}",
                 chain_id, address
             ));
-            Ok(StatusCode::NO_CONTENT)
+            Ok(ApiResponse::success("Token metadata deleted successfully"))
         }
-        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Ok(false) => Err(ApiResponse::<()>::error(
+            StatusCode::NOT_FOUND,
+            "Token metadata not found".to_string(),
+        )),
         Err(e) => {
             tracing::error!("Failed to delete token metadata: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to delete token metadata: {}", e),
+            ))
         }
     }
 }
@@ -77,46 +98,25 @@ pub async fn delete_token_metadata(
 pub async fn list_token_metadata(
     Query(params): Query<TokenMetadataQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<TokenMetadata>>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
-    let verified_only = params.verified_only.unwrap_or(false);
 
     match MetadataOperations::list_token_metadata(
         state.database.pool(),
         params.chain_id,
         limit,
         offset,
-        verified_only,
     )
     .await
     {
-        Ok(metadata_list) => Ok(Json(metadata_list)),
+        Ok(metadata_list) => Ok(ApiResponse::success(metadata_list)),
         Err(e) => {
             tracing::error!("Failed to list token metadata: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-pub async fn verify_token_metadata(
-    Path((chain_id, address)): Path<(i32, String)>,
-    State(state): State<ApiState>,
-) -> Result<Json<TokenMetadata>, StatusCode> {
-    match MetadataOperations::verify_token_metadata(state.database.pool(), chain_id, &address).await
-    {
-        Ok(Some(metadata)) => {
-            // 发送WebSocket通知
-            let _ = state.event_sender.send(format!(
-                "{{\"type\":\"token_verified\",\"data\":{{\"chain_id\":{},\"address\":\"{}\"}}}}",
-                chain_id, address
-            ));
-            Ok(Json(metadata))
-        }
-        Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(e) => {
-            tracing::error!("Failed to verify token metadata: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to list token metadata: {}", e),
+            ))
         }
     }
 }

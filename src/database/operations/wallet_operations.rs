@@ -63,7 +63,7 @@ impl WalletOperations {
         FROM swap_events se
         LEFT JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
         WHERE {}
-        ORDER BY se.created_at DESC
+        ORDER BY se.timestamp DESC
         LIMIT ${} OFFSET ${}
         "#,
             where_clause,
@@ -184,38 +184,5 @@ impl WalletOperations {
             Ok(None)
         }
     }
-    pub async fn get_wallet_portfolio(
-        pool: &PgPool,
-        chain_id: Option<i32>,
-        wallet_address: &str,
-    ) -> Result<Vec<HashMap<String, serde_json::Value>>, sqlx::Error> {
-        // This is a placeholder implementation
-        // In a real implementation, you would calculate the current token balances
-        // based on all swap and liquidity events for this wallet
-        Ok(vec![])
-    }
-
-    pub async fn get_wallet_pnl(
-        pool: &PgPool,
-        chain_id: Option<i32>,
-        wallet_address: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, sqlx::Error> {
-        // This is a placeholder implementation
-        // In a real implementation, you would calculate profit/loss
-        // based on entry/exit prices and current token values
-        let mut pnl = HashMap::new();
-        pnl.insert(
-            "realized_pnl".to_string(),
-            serde_json::Value::String("0".to_string()),
-        );
-        pnl.insert(
-            "unrealized_pnl".to_string(),
-            serde_json::Value::String("0".to_string()),
-        );
-        pnl.insert(
-            "total_pnl".to_string(),
-            serde_json::Value::String("0".to_string()),
-        );
-        Ok(pnl)
-    }
+   
 }

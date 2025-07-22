@@ -95,17 +95,8 @@ impl SystemOperations {
                 description TEXT,
                 website_url VARCHAR(500),
                 logo_url VARCHAR(500),
-                twitter_url VARCHAR(500),
-                telegram_url VARCHAR(500),
-                discord_url VARCHAR(500),
-                github_url VARCHAR(500),
-                explorer_url VARCHAR(500),
-                coingecko_id VARCHAR(100),
-                coinmarketcap_id VARCHAR(100),
                 total_supply DECIMAL,
                 max_supply DECIMAL,
-                is_verified BOOLEAN DEFAULT FALSE,
-                tags JSONB,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 UNIQUE(chain_id, address)
@@ -246,10 +237,6 @@ impl SystemOperations {
         // Indexes for token_metadata
         sqlx::query!(
             "CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(chain_id, symbol)"
-        ).execute(pool).await?;
-
-        sqlx::query!(
-            "CREATE INDEX IF NOT EXISTS idx_token_metadata_verified ON token_metadata(chain_id, is_verified)"
         ).execute(pool).await?;
 
         sqlx::query!(

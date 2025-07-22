@@ -34,7 +34,7 @@ pub async fn get_wallet_transactions(
 
     match WalletOperations::get_wallet_transactions(
         state.database.pool(),
-        &address,
+        &address.to_lowercase(),
         params.chain_id,
         limit,
         offset,
@@ -57,49 +57,13 @@ pub async fn get_wallet_stats(
 ) -> Result<Json<WalletStats>, StatusCode> {
     let days = params.days.unwrap_or(30);
 
-    match WalletOperations::get_wallet_stats(state.database.pool(), &address, params.chain_id, days)
+    match WalletOperations::get_wallet_stats(state.database.pool(), &address.to_lowercase(), params.chain_id, days)
         .await
     {
         Ok(Some(stats)) => Ok(Json(stats)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             tracing::error!("Failed to get wallet stats: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-pub async fn get_wallet_portfolio(
-    Path(address): Path<String>,
-    Query(params): Query<WalletQuery>,
-    State(state): State<ApiState>,
-) -> Result<Json<Vec<HashMap<String, serde_json::Value>>>, StatusCode> {
-    match WalletOperations::get_wallet_portfolio(state.database.pool(), params.chain_id, &address)
-        .await
-    {
-        Ok(portfolio) => Ok(Json(portfolio)),
-        Err(e) => {
-            tracing::error!("Failed to get wallet portfolio: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
-}
-
-pub async fn get_wallet_pnl(
-    Path(address): Path<String>,
-    Query(params): Query<WalletStatsQuery>,
-    State(state): State<ApiState>,
-) -> Result<Json<HashMap<String, serde_json::Value>>, StatusCode> {
-    match WalletOperations::get_wallet_pnl(
-        state.database.pool(),
-        params.chain_id, // 注意这里 chain_id 应该是 Option<i32> 类型
-        &address,
-    )
-    .await
-    {
-        Ok(pnl) => Ok(Json(pnl)),
-        Err(e) => {
-            tracing::error!("Failed to get wallet PnL: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

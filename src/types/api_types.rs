@@ -57,61 +57,27 @@ pub struct TokenMetadata {
     pub description: Option<String>,
     pub website_url: Option<String>,
     pub logo_url: Option<String>,
-    pub twitter_url: Option<String>,
-    pub telegram_url: Option<String>,
-    pub discord_url: Option<String>,
-    pub github_url: Option<String>,
-    pub explorer_url: Option<String>,
-    pub coingecko_id: Option<String>,
-    pub coinmarketcap_id: Option<String>,
+  
     pub total_supply: Option<Decimal>,
     pub max_supply: Option<Decimal>,
-    pub is_verified: bool,
-    pub tags: Option<Vec<String>>, // JSON array stored as text
+ 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateTokenMetadata {
-    pub chain_id: i32,
-    pub address: String,
-    pub symbol: String,
-    pub name: String,
-    pub decimals: i32,
-    pub description: Option<String>,
-    pub website_url: Option<String>,
-    pub logo_url: Option<String>,
-    pub twitter_url: Option<String>,
-    pub telegram_url: Option<String>,
-    pub discord_url: Option<String>,
-    pub github_url: Option<String>,
-    pub explorer_url: Option<String>,
-    pub coingecko_id: Option<String>,
-    pub coinmarketcap_id: Option<String>,
-    pub total_supply: Option<Decimal>,
-    pub max_supply: Option<Decimal>,
-    pub tags: Option<Vec<String>>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateTokenMetadata {
+    pub chain_id: i32,
+    pub address: String,
     pub symbol: Option<String>,
     pub name: Option<String>,
     pub decimals: Option<i32>,
     pub description: Option<String>,
     pub website_url: Option<String>,
     pub logo_url: Option<String>,
-    pub twitter_url: Option<String>,
-    pub telegram_url: Option<String>,
-    pub discord_url: Option<String>,
-    pub github_url: Option<String>,
-    pub explorer_url: Option<String>,
-    pub coingecko_id: Option<String>,
-    pub coinmarketcap_id: Option<String>,
     pub total_supply: Option<Decimal>,
     pub max_supply: Option<Decimal>,
-    pub tags: Option<Vec<String>>,
 }
 
 
