@@ -43,10 +43,10 @@ impl PriceService {
         let tokens = vec![
             TokenPriceConfig {
                 symbol: "NOS".to_string(),
-                address: "0x0000000000000000000000000000000000000000".to_string(), // 需要实际的NOS合约地址
-                chain_id: 1, // 以太坊主网
+                address: "0x3654E970df72B612113b05D0606E9d8968666b58".to_string(), // 需要实际的NOS合约地址
+                chain_id: 2463, // 以太坊主网
                 api_url: "https://api.bidacoin.co/api/v0/markets/publicapi/ticker?market=NOSUSDT".to_string(),
-                update_interval: Duration::from_secs(60), // 每分钟更新一次
+                update_interval: Duration::from_secs(60*10), // 每分钟更新一次
             },
         ];
 
@@ -129,7 +129,7 @@ impl PriceService {
             timestamp: Some(Utc::now()),
         };
 
-        PriceOperations::insert_token_price(pool, &price_data).await?;
+        PriceOperations::upsert_token_price(pool, &price_data).await?;
 
         Ok(price)
     }
@@ -193,15 +193,5 @@ impl PriceService {
         }
     }
 
-    /// 清理旧的价格数据（保留最近30天）
-    pub async fn cleanup_old_data(&self) -> Result<u64> {
-        let cutoff_time = Utc::now() - chrono::Duration::days(30);
-        let deleted_count = PriceOperations::cleanup_old_prices(&self.pool, cutoff_time).await?;
-        
-        if deleted_count > 0 {
-            info!("🧹 清理了 {} 条旧价格记录", deleted_count);
-        }
-
-        Ok(deleted_count)
-    }
+    
 }

@@ -186,7 +186,8 @@ impl SystemOperations {
                 price_usd DECIMAL(36, 18) NOT NULL,
                 source VARCHAR(50) NOT NULL, -- 价格来源，如 'bidacoin', 'coingecko' 等
                 timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                UNIQUE(chain_id, token_address)
             )
             "#
         )
