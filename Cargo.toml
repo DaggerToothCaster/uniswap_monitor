@@ -3,7 +3,12 @@ name = "uniswap-monitor"
 version = "0.1.0"
 edition = "2021"
 
+[lints.clippy]
+unused_variables = "allow"
+dead_code = "allow"
+
 [dependencies]
+config = "0.15.13"
 tokio = { version = "1.0", features = ["full"] }
 ethers = { version = "2.0", features = ["rustls"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -18,10 +23,24 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-config = "0.14"
 dotenv = "0.15"
 
 hex = "0.4"
+futures-util = "0.3.31"
+reqwest = {version="0.12.22",features = ["json", "gzip", "brotli", "deflate", "rustls-tls"]}
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+
+[[bin]]
+name = "event-service"
+path = "src/bin/event_service.rs"
+
+[[bin]]
+name = "api-service"
+path = "src/bin/api_service.rs"
+
+[[bin]]
+name = "combined-service"
+path = "src/bin/combined_service.rs"

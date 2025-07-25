@@ -14,17 +14,7 @@
 --   description       : TEXT, optional description of the token.
 --   website_url       : VARCHAR(500), optional official website URL.
 --   logo_url          : VARCHAR(500), optional logo image URL.
---   twitter_url       : VARCHAR(500), optional Twitter profile URL.
---   telegram_url      : VARCHAR(500), optional Telegram group/channel URL.
---   discord_url       : VARCHAR(500), optional Discord server URL.
---   github_url        : VARCHAR(500), optional GitHub repository URL.
---   explorer_url      : VARCHAR(500), optional blockchain explorer URL.
---   coingecko_id      : VARCHAR(100), optional CoinGecko identifier.
---   coinmarketcap_id  : VARCHAR(100), optional CoinMarketCap identifier.
---   total_supply      : DECIMAL, optional total supply of the token.
 --   max_supply        : DECIMAL, optional maximum supply of the token.
---   is_verified       : BOOLEAN, indicates if the token is verified (default: FALSE).
---   tags              : JSONB, optional array of tags or categories.
 --   created_at        : TIMESTAMPTZ, record creation timestamp (default: NOW()).
 --   updated_at        : TIMESTAMPTZ, record last update timestamp (default: NOW()).
 --
@@ -42,17 +32,8 @@ CREATE TABLE IF NOT EXISTS token_metadata (
     description TEXT,
     website_url VARCHAR(500),
     logo_url VARCHAR(500),
-    twitter_url VARCHAR(500),
-    telegram_url VARCHAR(500),
-    discord_url VARCHAR(500),
-    github_url VARCHAR(500),
-    explorer_url VARCHAR(500),
-    coingecko_id VARCHAR(100),
-    coinmarketcap_id VARCHAR(100),
     total_supply DECIMAL,
     max_supply DECIMAL,
-    is_verified BOOLEAN DEFAULT FALSE,
-    tags JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(chain_id, address)
@@ -61,7 +42,6 @@ CREATE TABLE IF NOT EXISTS token_metadata (
 -- Create indexes for token_metadata
 CREATE INDEX IF NOT EXISTS idx_token_metadata_chain_address ON token_metadata(chain_id, address);
 CREATE INDEX IF NOT EXISTS idx_token_metadata_symbol ON token_metadata(symbol);
-CREATE INDEX IF NOT EXISTS idx_token_metadata_verified ON token_metadata(is_verified);
 CREATE INDEX IF NOT EXISTS idx_token_metadata_tags ON token_metadata USING GIN(tags);
 
 -- Create function to update updated_at timestamp
