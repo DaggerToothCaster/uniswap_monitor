@@ -3,7 +3,7 @@ use crate::database::Database;
 use anyhow::Result;
 use ethers::{
     providers::{Http, Middleware, Provider},
-    types::Address,
+    types::{Address,H256},
 };
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -109,4 +109,20 @@ impl BaseEventListener {
     pub async fn sleep_poll_interval(&self) {
         sleep(self.poll_interval).await;
     }
+
+
+    pub async fn get_transaction_origin(&self, tx_hash: H256) -> Result<String> {
+        // 使用原始JSON RPC请求避免自动反序列化
+        let tx_json: serde_json::Value = self.provider
+            .request("eth_getTransactionByHash", [tx_hash])
+            .await?;
+
+        // 手动处理大小写不敏感的字段
+        let from = tx_json["from"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing from field"))?;
+
+        Ok(from.to_lowercase()) // 统一返回小写地址
+    }
+
 }

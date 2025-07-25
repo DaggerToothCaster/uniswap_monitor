@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::api::websocket::{send_liquidity_event, send_swap_event};
 use crate::database::operations::{EventOperations, TradingOperations};
 
 abigen!(
@@ -264,6 +265,10 @@ impl SwapEventListener {
     }
 
     async fn handle_swap_event(&self, log: Log, timestamp: DateTime<Utc>) -> Result<()> {
+        // 获取交易发起人地址（实际用户）
+        let tx_origin =
+            self.base.get_transaction_origin(log.transaction_hash.unwrap()).await?;
+
         match SwapFilter::decode_log(&RawLog {
             topics: log.topics.clone(),
             data: log.data.0.to_vec(),
@@ -273,7 +278,7 @@ impl SwapEventListener {
                     id: Uuid::new_v4(),
                     chain_id: self.base.chain_id as i32,
                     pair_address: format!("0x{:x}", log.address),
-                    sender: format!("0x{:x}", event.sender),
+                    sender: tx_origin,
                     amount0_in: Decimal::from(event.amount_0_in.as_u128()),
                     amount1_in: Decimal::from(event.amount_1_in.as_u128()),
                     amount0_out: Decimal::from(event.amount_0_out.as_u128()),
@@ -286,6 +291,9 @@ impl SwapEventListener {
                 };
 
                 EventOperations::insert_swap_event(self.base.database.pool(), &swap_event).await?;
+                // WS的推送
+                send_swap_event(&self.base.event_sender, &swap_event);
+
                 let _ = self
                     .base
                     .event_sender
@@ -305,7 +313,7 @@ impl SwapEventListener {
                             id: Uuid::new_v4(),
                             chain_id: self.base.chain_id as i32,
                             pair_address: format!("0x{:x}", log.address),
-                            sender: format!("0x{:x}", sender),
+                            sender: tx_origin,
                             amount0_in: Decimal::from(amount0_in.as_u128()),
                             amount1_in: Decimal::from(amount1_in.as_u128()),
                             amount0_out: Decimal::from(amount0_out.as_u128()),
@@ -319,6 +327,9 @@ impl SwapEventListener {
 
                         EventOperations::insert_swap_event(self.base.database.pool(), &swap_event)
                             .await?;
+                        // WS的推送
+                        send_swap_event(&self.base.event_sender, &swap_event);
+
                         let _ = self
                             .base
                             .event_sender
@@ -343,6 +354,8 @@ impl SwapEventListener {
     }
 
     async fn handle_mint_event(&self, log: Log, timestamp: DateTime<Utc>) -> Result<()> {
+        let tx_origin = self.base.get_transaction_origin(log.transaction_hash.unwrap())
+            .await?;
         let event = MintFilter::decode_log(&RawLog {
             topics: log.topics.clone(),
             data: log.data.0.to_vec(),
@@ -352,7 +365,7 @@ impl SwapEventListener {
             id: Uuid::new_v4(),
             chain_id: self.base.chain_id as i32,
             pair_address: format!("0x{:x}", log.address),
-            sender: format!("0x{:x}", event.sender),
+            sender: tx_origin,
             amount0: Decimal::from(event.amount_0.as_u128()),
             amount1: Decimal::from(event.amount_1.as_u128()),
             block_number: log.block_number.unwrap().as_u64() as i64,
@@ -362,6 +375,14 @@ impl SwapEventListener {
         };
 
         EventOperations::insert_mint_event(self.base.database.pool(), &mint_event).await?;
+        // WS 推送
+        send_liquidity_event(
+            &self.base.event_sender,
+            &"mint".to_string(),
+            Some(&mint_event),
+            None,
+        );
+
         let _ = self
             .base
             .event_sender
@@ -376,6 +397,9 @@ impl SwapEventListener {
     }
 
     async fn handle_burn_event(&self, log: Log, timestamp: DateTime<Utc>) -> Result<()> {
+        let tx_origin = self.base.get_transaction_origin(log.transaction_hash.unwrap())
+            .await?;
+
         let event = BurnFilter::decode_log(&RawLog {
             topics: log.topics.clone(),
             data: log.data.0.to_vec(),
@@ -385,7 +409,7 @@ impl SwapEventListener {
             id: Uuid::new_v4(),
             chain_id: self.base.chain_id as i32,
             pair_address: format!("0x{:x}", log.address),
-            sender: format!("0x{:x}", event.sender),
+            sender: tx_origin,
             amount0: Decimal::from(event.amount_0.as_u128()),
             amount1: Decimal::from(event.amount_1.as_u128()),
             to_address: format!("0x{:x}", event.to),
@@ -396,6 +420,14 @@ impl SwapEventListener {
         };
 
         EventOperations::insert_burn_event(self.base.database.pool(), &burn_event).await?;
+        // WS 推送
+        send_liquidity_event(
+            &self.base.event_sender,
+            &"burn".to_string(),
+            None,
+            Some(&burn_event),
+        );
+
         let _ = self
             .base
             .event_sender

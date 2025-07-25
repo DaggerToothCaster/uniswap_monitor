@@ -1,15 +1,18 @@
+pub mod base_listener;
 pub mod factory_listener;
 pub mod swap_listener;
-pub mod base_listener;
 
+pub use base_listener::BaseEventListener;
 pub use factory_listener::FactoryEventListener;
 pub use swap_listener::SwapEventListener;
-pub use base_listener::BaseEventListener;
 
 use crate::config::ChainConfig;
 use crate::database::Database;
 use anyhow::Result;
-use ethers::{providers::{Provider, Http}, types::Address};
+use ethers::{
+    providers::{Http, Provider},
+    types::Address,
+};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 #[derive(Clone)]
@@ -35,7 +38,7 @@ impl EventListenerManager {
         let factory_database = Arc::clone(&self.database);
         let factory_sender = self.event_sender.clone();
         let factory_config = config.clone();
-        
+
         let factory_handle = tokio::spawn(async move {
             let mut factory_listener = FactoryEventListener::new(
                 factory_provider,
@@ -58,7 +61,7 @@ impl EventListenerManager {
         let swap_database = Arc::clone(&self.database);
         let swap_sender = self.event_sender.clone();
         let swap_config = config.clone();
-        
+
         let swap_handle = tokio::spawn(async move {
             let mut swap_listener = SwapEventListener::new(
                 swap_provider,

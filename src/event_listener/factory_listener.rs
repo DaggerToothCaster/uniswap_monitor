@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::database::operations::EVENT_TYPE_FACTORY;
 use crate::database::operations::{EventOperations, TradingOperations};
+use crate::api::websocket::send_pair_created_event;
 
 abigen!(
     UniswapV2Factory,
@@ -243,6 +244,8 @@ impl FactoryEventListener {
         };
 
         TradingOperations::insert_trading_pair(self.base.database.pool(), &pair).await?;
+        // WS的消息推送
+        send_pair_created_event(&self.base.event_sender, &pair);
 
         let _ = self.base.event_sender.send(serde_json::to_string(&pair)?);
 

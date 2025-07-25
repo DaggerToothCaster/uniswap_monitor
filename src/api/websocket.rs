@@ -1,16 +1,16 @@
 use super::ApiState;
+use crate::types::*;
+use axum::extract::ws::{Message, WebSocket};
 use axum::{
     extract::{Query, State, WebSocketUpgrade},
     response::IntoResponse,
 };
-use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tokio::sync::broadcast;
-use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex;
-
 
 #[derive(Debug, Deserialize)]
 pub struct WebSocketQuery {
@@ -42,25 +42,24 @@ pub async fn websocket_handler(
     Query(params): Query<WebSocketQuery>,
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
-    let channels = params.channels
+    let channels = params
+        .channels
         .map(|c| c.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_else(|| vec!["all".to_string()]);
 
     ws.on_upgrade(move |socket| handle_websocket(socket, state, channels))
 }
 
-
-
 async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: Vec<String>) {
     let (mut sender, mut receiver) = socket.split();
     let mut event_receiver = state.event_sender.subscribe();
-    
+
     // 使用 Arc<Mutex> 包装 subscribed_channels 以共享可变状态
     let subscribed_channels = Arc::new(Mutex::new(
         initial_channels
             .into_iter()
             .map(|c| (c, true))
-            .collect::<HashMap<String, bool>>()
+            .collect::<HashMap<String, bool>>(),
     ));
 
     // 发送连接成功消息
@@ -82,27 +81,26 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
     let sender_channels = Arc::clone(&subscribed_channels);
     let sender_task = tokio::spawn(async move {
         while let Ok(event) = event_receiver.recv().await {
+            // 直接使用接收到的字符串，避免重复解析
             if let Ok(event_data) = serde_json::from_str::<serde_json::Value>(&event) {
-                let event_type = event_data.get("type")
+                let event_type = event_data
+                    .get("type")
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown");
+
+                // 检查是否是系统自动生成的 unknown 类型消息
+                if event_type == "unknown" {
+                    continue; // 跳过未知类型消息
+                }
 
                 let channel = get_channel_for_event(event_type);
 
                 // 获取锁并检查订阅状态
                 let channels = sender_channels.lock().await;
                 if channels.contains_key(&channel) || channels.contains_key("all") {
-                    let ws_message = WebSocketMessage {
-                        r#type: event_type.to_string(),
-                        channel: Some(channel),
-                        data: event_data,
-                        timestamp: chrono::Utc::now(),
-                    };
-
-                    if let Ok(msg) = serde_json::to_string(&ws_message) {
-                        if sender.send(Message::Text(msg)).await.is_err() {
-                            break;
-                        }
+                    // 直接转发原始消息，避免重复包装
+                    if sender.send(Message::Text(event)).await.is_err() {
+                        break;
                     }
                 }
             }
@@ -148,8 +146,6 @@ async fn handle_websocket(socket: WebSocket, state: ApiState, initial_channels: 
     }
 }
 
-
-
 fn get_channel_for_event(event_type: &str) -> String {
     match event_type {
         "new_pair" | "pair_created" => "pairs".to_string(),
@@ -163,7 +159,7 @@ fn get_channel_for_event(event_type: &str) -> String {
 }
 
 // 用于发送特定事件的辅助函数
-pub fn send_pair_created_event(sender: &broadcast::Sender<String>, pair: &crate::types::TradingPair) {
+pub fn send_pair_created_event(sender: &broadcast::Sender<String>, pair: &TradingPair) {
     let event = serde_json::json!({
         "type": "new_pair",
         "data": {
@@ -181,7 +177,7 @@ pub fn send_pair_created_event(sender: &broadcast::Sender<String>, pair: &crate:
     let _ = sender.send(event.to_string());
 }
 
-pub fn send_swap_event(sender: &broadcast::Sender<String>, swap: &crate::types::SwapEvent) {
+pub fn send_swap_event(sender: &broadcast::Sender<String>, swap: &SwapEvent) {
     let event = serde_json::json!({
         "type": "new_swap",
         "data": {
@@ -202,7 +198,12 @@ pub fn send_swap_event(sender: &broadcast::Sender<String>, swap: &crate::types::
     let _ = sender.send(event.to_string());
 }
 
-pub fn send_liquidity_event(sender: &broadcast::Sender<String>, event_type: &str, mint: Option<&crate::types::MintEvent>, burn: Option<&crate::types::BurnEvent>) {
+pub fn send_liquidity_event(
+    sender: &broadcast::Sender<String>,
+    event_type: &str,
+    mint: Option<&MintEvent>,
+    burn: Option<&BurnEvent>,
+) {
     let event = if let Some(mint) = mint {
         serde_json::json!({
             "type": "new_mint",
