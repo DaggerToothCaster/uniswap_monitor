@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use uuid::Uuid;
 
 /// 交易对
 /// token0地址字母序小于token1
@@ -57,14 +57,13 @@ pub struct TokenMetadata {
     pub description: Option<String>,
     pub website_url: Option<String>,
     pub logo_url: Option<String>,
-  
+
     pub total_supply: Option<Decimal>,
     pub max_supply: Option<Decimal>,
- 
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateTokenMetadata {
@@ -80,14 +79,12 @@ pub struct UpdateTokenMetadata {
     pub max_supply: Option<Decimal>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeSeriesData {
     pub timestamp: DateTime<Utc>,
     pub price: Decimal,
     pub volume: Decimal,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
@@ -144,6 +141,8 @@ pub struct WalletTransaction {
     pub transaction_type: String,
     pub amount0: Decimal,
     pub amount1: Decimal,
+    pub token0_decimals: Option<i32>,
+    pub token1_decimals: Option<i32>,
     pub price: Option<Decimal>,
     pub value_usd: Option<Decimal>,
     pub block_number: i64,
@@ -312,5 +311,3 @@ pub struct EventListenerStatus {
     pub blocks_behind: i64,
     pub last_updated: DateTime<Utc>,
 }
-
-

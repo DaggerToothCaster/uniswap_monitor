@@ -33,7 +33,8 @@ pub fn create_router(state: ApiState) -> Router {
             "/api/pairs/:chain_id/:address/stats",
             get(handlers::get_pair_stats),
         )
-        
+
+
         // Token routes
         .route("/api/tokens", get(handlers::get_token_list))
         .route("/api/tokens/search", get(handlers::search_tokens))
@@ -43,7 +44,8 @@ pub fn create_router(state: ApiState) -> Router {
             "/api/tokens/:chain_id/:address",
             get(handlers::get_token_detail),
         )
-        
+
+
         // Wallet routes
         .route(
             "/api/wallets/:address/transactions",
@@ -54,10 +56,7 @@ pub fn create_router(state: ApiState) -> Router {
             get(handlers::get_wallet_stats),
         )
         
-        // Chain stats routes
-        .route("/api/chains/stats", get(handlers::get_chain_stats))
-        .route("/api/system/health", get(handlers::get_system_health))
-        
+
         // Token metadata management routes
         .route(
             "/api/metadata/tokens",
@@ -67,12 +66,18 @@ pub fn create_router(state: ApiState) -> Router {
             "/api/metadata/tokens/:chain_id/:address",
             get(handlers::get_token_metadata).delete(handlers::delete_token_metadata),
         )
+        
+        
         // Status routes
+        .route("/api/status/chains", get(handlers::get_chain_stats))
+        .route("/api/status/health", get(handlers::get_system_health))
         .route("/api/status/blocks", get(handlers::get_processing_status))
         .route(
             "/api/status/blocks/detailed",
             get(handlers::get_detailed_processing_status),
         )
+        
+        
         // WebSocket
         .route("/api/ws", get(websocket::websocket_handler))
         .layer(CorsLayer::permissive())

@@ -1,11 +1,13 @@
 use crate::database::utils::*;
-use crate::types::*;
 use crate::types::WalletTransaction;
+use crate::types::*;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 pub struct WalletOperations;
 
 impl WalletOperations {
@@ -16,7 +18,7 @@ impl WalletOperations {
         limit: i32,
         offset: i32,
         transaction_type: Option<&str>,
-    ) -> Result<Vec<WalletTransaction>> {
+    ) -> Result<Vec<WalletTransaction>, sqlx::Error> {
         let mut conditions = vec!["(se.sender = $1 OR se.to_address = $1)".to_string()];
         let mut param_count = 1;
 
@@ -27,11 +29,8 @@ impl WalletOperations {
 
         if let Some(tx_type) = transaction_type {
             match tx_type {
-                "swap" => {
-                    // 只查询swap事件
-                }
+                "swap" => {}
                 "mint" | "burn" => {
-                    // 这里需要联合查询mint和burn事件，暂时先返回空
                     return Ok(vec![]);
                 }
                 _ => {}
@@ -42,30 +41,37 @@ impl WalletOperations {
 
         let query = format!(
             r#"
-        SELECT 
-            se.id,
-            se.chain_id,
-            se.pair_address,
-            tp.token0_symbol,
-            tp.token1_symbol,
-            se.transaction_hash,
-            $1 as wallet_address,
-            'swap' as transaction_type,
-            se.amount0_in + se.amount0_out as amount0,
-            se.amount1_in + se.amount1_out as amount1,
-            CASE 
-                WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN se.amount0_in / se.amount1_out
-                WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN se.amount0_out / se.amount1_in
-                ELSE 0
-            END as price,
-            se.block_number,
-            se.timestamp
-        FROM swap_events se
-        LEFT JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
-        WHERE {}
-        ORDER BY se.timestamp DESC
-        LIMIT ${} OFFSET ${}
-        "#,
+    SELECT 
+        se.id,
+        se.chain_id,
+        se.pair_address,
+        tp.token0_symbol,
+        tp.token1_symbol,
+        tp.token0_decimals,
+        tp.token1_decimals,
+        se.transaction_hash,
+        $1 as wallet_address,
+        'swap' as transaction_type,
+        (se.amount0_in + se.amount0_out)::numeric as amount0,
+        (se.amount1_in + se.amount1_out)::numeric as amount1,
+        CASE 
+            WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                ((se.amount0_in::numeric / power(10, COALESCE(tp.token0_decimals, 18))) / 
+                 (se.amount1_out::numeric / power(10, COALESCE(tp.token1_decimals, 18))))
+            WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 
+                ((se.amount0_out::numeric / power(10, COALESCE(tp.token0_decimals, 18))) / 
+                 (se.amount1_in::numeric / power(10, COALESCE(tp.token1_decimals, 18))))
+            ELSE 0
+        END as price,
+        se.block_number,
+        se.timestamp
+    FROM swap_events se
+    LEFT JOIN trading_pairs tp 
+        ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
+    WHERE {}
+    ORDER BY se.timestamp DESC
+    LIMIT ${} OFFSET ${}
+    "#,
             where_clause,
             param_count + 1,
             param_count + 2
@@ -84,7 +90,17 @@ impl WalletOperations {
             .await?;
 
         let mut transactions = Vec::new();
+
         for row in rows {
+            let token0_decimals = safe_get_optional_i32(&row, "token0_decimals").unwrap_or(18);
+            let token1_decimals = safe_get_optional_i32(&row, "token1_decimals").unwrap_or(18);
+
+            let raw_price = safe_get_decimal(&row, "price");
+            let decimals_adjustment =
+                Decimal::from_f64(10f64.powi((token1_decimals - token0_decimals) as i32))
+                    .unwrap_or(Decimal::ONE);
+            let adjusted_price = raw_price * decimals_adjustment;
+
             transactions.push(WalletTransaction {
                 id: safe_get_uuid(&row, "id"),
                 chain_id: safe_get_i32(&row, "chain_id"),
@@ -96,7 +112,9 @@ impl WalletOperations {
                 transaction_type: safe_get_string(&row, "transaction_type"),
                 amount0: safe_get_decimal(&row, "amount0"),
                 amount1: safe_get_decimal(&row, "amount1"),
-                price: Some(safe_get_decimal(&row, "price")),
+                token0_decimals: Some(token0_decimals),
+                token1_decimals: Some(token1_decimals),
+                price: Some(adjusted_price),
                 value_usd: None,
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
@@ -184,5 +202,4 @@ impl WalletOperations {
             Ok(None)
         }
     }
-   
 }

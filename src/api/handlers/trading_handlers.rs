@@ -1,13 +1,10 @@
 use super::super::ApiState;
 use crate::database::operations::TradingOperations;
-use crate::types::*;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Json,
 };
 use serde::Deserialize;
-use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct KlineQuery {
@@ -39,14 +36,14 @@ pub struct LiquidityQuery {
     pub offset: Option<i32>,
 }
 
+// 复用之前定义的 ApiResponse 结构体
+use super::ApiResponse;
+
 /// 交易对-列表
-/// [chain_id]    链ID
-/// [limit]       每页数量
-/// [offset]      页码
 pub async fn get_pairs(
     Query(params): Query<PairsQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<TradingPair>>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     match TradingOperations::get_all_pairs(
         state.database.pool(),
         params.chain_id,
@@ -55,10 +52,11 @@ pub async fn get_pairs(
     )
     .await
     {
-        Ok(pairs) => Ok(Json(pairs)),
+        Ok(pairs) => Ok(ApiResponse::success(pairs)),
         Err(e) => {
-            tracing::error!("Failed to get pairs: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Failed to get pairs: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -66,14 +64,17 @@ pub async fn get_pairs(
 pub async fn get_pair_detail(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
-) -> Result<Json<PairDetail>, (StatusCode, String)> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     match TradingOperations::get_pair_detail(state.database.pool(), &address, chain_id).await {
-        Ok(Some(detail)) => Ok(Json(detail)),
-        Ok(None) => Err((StatusCode::NOT_FOUND, "Pair not found".to_string())),
+        Ok(Some(detail)) => Ok(ApiResponse::success(detail)),
+        Ok(None) => Err(ApiResponse::<()>::error(
+            StatusCode::NOT_FOUND,
+            "Pair not found".to_string(),
+        )),
         Err(e) => {
             let error_msg = format!("Database error: {}", e);
             tracing::error!("{}", error_msg);
-            Err((StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -82,13 +83,15 @@ pub async fn get_kline(
     Path((chain_id, address)): Path<(i32, String)>,
     Query(params): Query<KlineQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<KLineData>>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     let interval = params.interval.unwrap_or_else(|| "1h".to_string());
     let limit = params.limit.unwrap_or(100);
 
-    // 验证时间区间参数
     if !is_valid_interval(&interval) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiResponse::<()>::error(
+            StatusCode::BAD_REQUEST,
+            "Invalid interval parameter".to_string(),
+        ));
     }
 
     match TradingOperations::get_kline_data(
@@ -100,10 +103,11 @@ pub async fn get_kline(
     )
     .await
     {
-        Ok(klines) => Ok(Json(klines)),
+        Ok(klines) => Ok(ApiResponse::success(klines)),
         Err(e) => {
-            tracing::error!("Failed to get kline data: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Failed to get kline data: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -112,22 +116,24 @@ pub async fn get_timeseries(
     Path((chain_id, address)): Path<(i32, String)>,
     Query(params): Query<TimeSeriesQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<TimeSeriesData>>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     let hours = params.hours.unwrap_or(24);
 
-    // 限制查询范围
     if hours > 168 {
-        // 最多7天
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiResponse::<()>::error(
+            StatusCode::BAD_REQUEST,
+            "Maximum time range is 168 hours (7 days)".to_string(),
+        ));
     }
 
     match TradingOperations::get_timeseries_data(state.database.pool(), &address, chain_id, hours)
         .await
     {
-        Ok(timeseries) => Ok(Json(timeseries)),
+        Ok(timeseries) => Ok(ApiResponse::success(timeseries)),
         Err(e) => {
-            tracing::error!("Failed to get timeseries data: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Failed to get timeseries data: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -136,7 +142,7 @@ pub async fn get_pair_trades(
     Path((chain_id, address)): Path<(i32, String)>,
     Query(params): Query<TradeQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<TradeRecord>>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
@@ -149,10 +155,11 @@ pub async fn get_pair_trades(
     )
     .await
     {
-        Ok(trades) => Ok(Json(trades)),
+        Ok(trades) => Ok(ApiResponse::success(trades)),
         Err(e) => {
-            tracing::error!("Failed to get pair trades: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Failed to get pair trades: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -161,7 +168,7 @@ pub async fn get_pair_liquidity(
     Path((chain_id, address)): Path<(i32, String)>,
     Query(params): Query<LiquidityQuery>,
     State(state): State<ApiState>,
-) -> Result<Json<Vec<LiquidityRecord>>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
@@ -174,10 +181,11 @@ pub async fn get_pair_liquidity(
     )
     .await
     {
-        Ok(liquidity) => Ok(Json(liquidity)),
+        Ok(liquidity) => Ok(ApiResponse::success(liquidity)),
         Err(e) => {
-            tracing::error!("Failed to get pair liquidity: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Failed to get pair liquidity: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }
@@ -185,13 +193,17 @@ pub async fn get_pair_liquidity(
 pub async fn get_pair_stats(
     Path((chain_id, address)): Path<(i32, String)>,
     State(state): State<ApiState>,
-) -> Result<Json<PairStats>, StatusCode> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     match TradingOperations::get_pair_stats(state.database.pool(), &address, chain_id).await {
-        Ok(Some(stats)) => Ok(Json(stats)),
-        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Ok(Some(stats)) => Ok(ApiResponse::success(stats)),
+        Ok(None) => Err(ApiResponse::<()>::error(
+            StatusCode::NOT_FOUND,
+            "Pair stats not found".to_string(),
+        )),
         Err(e) => {
-            tracing::error!("Failed to get pair stats: {}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            let error_msg = format!("Failed to get pair stats: {}", e);
+            tracing::error!("{}", error_msg);
+            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
         }
     }
 }

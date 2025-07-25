@@ -73,6 +73,8 @@ impl StatsOperations {
         Ok(stats)
     }
 
+
+    /// 
     pub async fn get_processing_status(
         pool: &PgPool,
         chain_id: Option<i32>,
