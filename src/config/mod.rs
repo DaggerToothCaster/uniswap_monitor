@@ -4,7 +4,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub database: DatabaseConfig,
-    pub chains: HashMap<u64, ChainConfig>,
+    pub chains: HashMap<u64, ChainConfig>, // 保持u64作为chain_id的key
     pub server: ServerConfig,
     pub defaults: DefaultConfig,
 }
@@ -17,7 +17,8 @@ pub struct DatabaseConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChainConfig {
-    pub name: String,
+    pub chain_id: u64,       // 保留chain_id字段
+    pub name: String,        // 保留name字段
     pub rpc_url: String,
     pub factory_address: String,
     pub start_block: u64,
@@ -39,106 +40,112 @@ pub struct DefaultConfig {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        if let Err(_) = dotenv::dotenv() {
-            Self::print_config_help();
-            return Err(anyhow::anyhow!(
-                "配置文件不存在，请按照上述提示创建配置文件"
-            ));
-        }
+        let _ = dotenv::dotenv().ok();
 
         if std::env::var("DATABASE_URL").is_err() {
             Self::print_config_help();
-            return Err(anyhow::anyhow!(
-                "缺少必要的配置项，请按照上述提示完善配置文件"
-            ));
+            return Err(anyhow::anyhow!("缺少DATABASE_URL配置"));
         }
 
         let defaults = DefaultConfig {
-            block_batch_size: std::env::var("DEFAULT_BLOCK_BATCH_SIZE")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()?,
+            block_batch_size: env_var_or_default("DEFAULT_BLOCK_BATCH_SIZE", 1000)?,
         };
 
-        let mut chains = HashMap::new();
-
-        // Ethereum Mainnet
-        if Self::is_chain_configured("NOS") {
-            chains.insert(
-                2643,
-                ChainConfig {
-                    name: "NOS".to_string(),
-                    rpc_url: std::env::var("NOS_RPC_URL")
-                        .unwrap_or_else(|_| "https://rpc-mainnet.noschain.org".to_string()),
-                    factory_address: std::env::var("NOS_FACTORY_ADDRESS").unwrap_or_else(|_| {
-                        "0x24D4B13082e4A0De789190fD55cB4565E3C4dFA5".to_string()
-                    }),
-                    start_block: std::env::var("NOS_START_BLOCK")
-                        .unwrap_or_else(|_| "1302932".to_string())
-                        .parse()?,
-                    poll_interval: std::env::var("NOS_POLL_INTERVAL")
-                        .unwrap_or_else(|_| "12".to_string())
-                        .parse()?,
-                    enabled: std::env::var("NOS_ENABLED")
-                        .unwrap_or_else(|_| "false".to_string())
-                        .parse()?,
-                    block_batch_size: std::env::var("NOS_BLOCK_BATCH_SIZE")
-                        .unwrap_or_else(|_| defaults.block_batch_size.to_string())
-                        .parse()?,
-                },
-            );
-        }
-
+        let chains = Self::load_configured_chains(&defaults)?;
         if chains.is_empty() {
             Self::print_config_help();
-            return Err(anyhow::anyhow!("没有配置任何区块链，请至少配置一个区块链"));
+            return Err(anyhow::anyhow!("没有配置任何区块链"));
         }
 
         Ok(Config {
             database: DatabaseConfig {
                 url: std::env::var("DATABASE_URL")?,
-                max_connections: std::env::var("DB_MAX_CONNECTIONS")
-                    .unwrap_or_else(|_| "10".to_string())
-                    .parse()?,
+                max_connections: env_var_or_default("DB_MAX_CONNECTIONS", 10)?,
             },
             chains,
             server: ServerConfig {
-                host: std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-                port: std::env::var("SERVER_PORT")
-                    .unwrap_or_else(|_| "3000".to_string())
-                    .parse()?,
+                host: env_var_or_default("SERVER_HOST", "0.0.0.0".to_string())?,
+                port: env_var_or_default("SERVER_PORT", 3000)?,
             },
             defaults,
         })
     }
 
-    fn is_chain_configured(chain_prefix: &str) -> bool {
-        std::env::var(format!("{}_RPC_URL", chain_prefix)).is_ok()
+    fn load_configured_chains(defaults: &DefaultConfig) -> anyhow::Result<HashMap<u64, ChainConfig>> {
+        let mut chains = HashMap::new();
+        
+        // 定义支持的链信息 (chain_id, name, env_prefix)
+        let supported_chains = [
+            (2643u64, "NOS", "NOS"),
+            (2559u64, "KTO", "KTO"),
+            (1u64, "Ethereum", "ETH"),
+        ];
+
+        for (chain_id, name, prefix) in supported_chains {
+            if Self::is_chain_configured(prefix) {
+                chains.insert(
+                    chain_id,
+                    ChainConfig {
+                        chain_id,
+                        name: name.to_string(),
+                        rpc_url: required_env_var(&format!("{}_RPC_URL", prefix))?,
+                        factory_address: required_env_var(&format!("{}_FACTORY_ADDRESS", prefix))?,
+                        start_block: env_var_or_default(&format!("{}_START_BLOCK", prefix), 0)?,
+                        poll_interval: env_var_or_default(&format!("{}_POLL_INTERVAL", prefix), 12)?,
+                        enabled: env_var_or_default(&format!("{}_ENABLED", prefix), false)?,
+                        block_batch_size: env_var_or_default(
+                            &format!("{}_BLOCK_BATCH_SIZE", prefix),
+                            defaults.block_batch_size,
+                        )?,
+                    },
+                );
+            }
+        }
+        
+        Ok(chains)
+    }
+
+    fn is_chain_configured(prefix: &str) -> bool {
+        std::env::var(format!("{}_RPC_URL", prefix)).is_ok() &&
+        std::env::var(format!("{}_FACTORY_ADDRESS", prefix)).is_ok()
     }
 
     fn print_config_help() {
-        println!("\n🔧 配置文件不存在或配置不完整！");
-        println!("{}", "=".repeat(80));
-        println!("请创建 .env 文件并添加以下配置：\n");
+        println!("\n🔧 配置指南");
+        println!("{}", "=".repeat(50));
+        println!("请配置以下环境变量:\n");
 
-        println!("# 数据库配置");
-        println!("DATABASE_URL=postgresql://username:password@localhost/uniswap_monitor");
-        println!("DB_MAX_CONNECTIONS=10\n");
+        println!("[必需配置]");
+        println!("DATABASE_URL=postgres://user:pass@host/db");
+        println!("<PREFIX>_RPC_URL=https://...");
+        println!("<PREFIX>_FACTORY_ADDRESS=0x...\n");
 
-        println!("# 以太坊配置");
-        println!("ETH_RPC_URL=https://mainnet.infura.io/v3/YOUR_INFURA_KEY");
-        println!("ETH_FACTORY_ADDRESS=0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f");
-        println!("ETH_START_BLOCK=10000835");
-        println!("ETH_POLL_INTERVAL=12");
-        println!("ETH_ENABLED=true");
-        println!("ETH_BLOCK_BATCH_SIZ=1000\n");
-
-        println!("# 服务器配置");
+        println!("[可选配置]");
+        println!("DB_MAX_CONNECTIONS=10");
         println!("SERVER_HOST=0.0.0.0");
-        println!("SERVER_PORT=3000\n");
-
-        println!("# 全局默认配置");
+        println!("SERVER_PORT=3000");
         println!("DEFAULT_BLOCK_BATCH_SIZE=1000\n");
 
-        println!("{}", "=".repeat(80));
+        println!("[支持的链]");
+        println!("NOS (chain_id: 2643): NOS_RPC_URL, NOS_FACTORY_ADDRESS");
+        println!("KTO (chain_id: <填写>): KTO_RPC_URL, KTO_FACTORY_ADDRESS");
+        println!("ETH (chain_id: 1): ETH_RPC_URL, ETH_FACTORY_ADDRESS\n");
+
+        println!("{}", "=".repeat(50));
     }
+}
+
+// 辅助函数保持不变
+fn env_var_or_default<T: std::str::FromStr>(key: &str, default: T) -> anyhow::Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match std::env::var(key) {
+        Ok(val) => val.parse().map_err(|e| anyhow::anyhow!("配置 {} 解析失败: {}", key, e)),
+        Err(_) => Ok(default),
+    }
+}
+
+fn required_env_var(key: &str) -> anyhow::Result<String> {
+    std::env::var(key).map_err(|_| anyhow::anyhow!("缺少必需配置: {}", key))
 }
