@@ -35,7 +35,6 @@ impl WalletOperations {
                     // swap事件已经是默认的，不需要额外过滤
                 }
                 "mint" | "burn" => {
-                    // 如果需要mint/burn事件，需要查询不同的表
                     return Ok((vec![], 0));
                 }
                 _ => {
@@ -46,9 +45,10 @@ impl WalletOperations {
 
         let where_clause = conditions.join(" AND ");
 
-        // 修复后的主查询 - 参考get_pair_trades的价格计算逻辑
+        // 优化的查询 - 使用CTE提高可读性
         let query = format!(
             r#"
+        WITH wallet_trades AS (
             SELECT 
                 se.id,
                 se.chain_id,
@@ -60,21 +60,42 @@ impl WalletOperations {
                 se.transaction_hash,
                 $1 as wallet_address,
                 'swap' as transaction_type,
-                se.amount0_in,
-                se.amount1_in,
-                se.amount0_out,
-                se.amount1_out,
-                -- 修复价格计算逻辑，参考get_pair_trades
+                -- 金额转换：除以对应的精度
+                CASE 
+                    WHEN tp.token0_decimals IS NOT NULL THEN
+                        (se.amount0_in)::NUMERIC / POWER(10, tp.token0_decimals)::NUMERIC
+                    ELSE
+                        (se.amount0_in)::NUMERIC / POWER(10, 18)::NUMERIC
+                END as amount0_in,
+                CASE 
+                    WHEN tp.token1_decimals IS NOT NULL THEN
+                        (se.amount1_in)::NUMERIC / POWER(10, tp.token1_decimals)::NUMERIC
+                    ELSE
+                        (se.amount1_in)::NUMERIC / POWER(10, 18)::NUMERIC
+                END as amount1_in,
+                CASE 
+                    WHEN tp.token0_decimals IS NOT NULL THEN
+                        (se.amount0_out)::NUMERIC / POWER(10, tp.token0_decimals)::NUMERIC
+                    ELSE
+                        (se.amount0_out)::NUMERIC / POWER(10, 18)::NUMERIC
+                END as amount0_out,
+                CASE 
+                    WHEN tp.token1_decimals IS NOT NULL THEN
+                        (se.amount1_out)::NUMERIC / POWER(10, tp.token1_decimals)::NUMERIC
+                    ELSE
+                        (se.amount1_out)::NUMERIC / POWER(10, 18)::NUMERIC
+                END as amount1_out,
+                -- 价格计算
                 CASE 
                     WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
-                        (se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC /
-                        NULLIF((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC, 0)
+                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
                     WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
-                        (se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC /
-                        NULLIF((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC, 0)
+                        ((se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                        NULLIF(((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
                     ELSE 0
                 END::NUMERIC(38,18) as price,
-                -- 交易类型判断
+                -- 交易类型
                 CASE 
                     WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 'buy'
                     WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 'sell'
@@ -83,27 +104,28 @@ impl WalletOperations {
                 se.block_number,
                 se.timestamp
             FROM swap_events se
-            -- 使用JOIN而不是LEFT JOIN确保能获取到交易对信息
             JOIN trading_pairs tp 
                 ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
             WHERE {}
-            ORDER BY se.timestamp DESC
-            LIMIT ${} OFFSET ${}
-            "#,
+        )
+        SELECT * FROM wallet_trades
+        ORDER BY timestamp DESC
+        LIMIT ${} OFFSET ${}
+        "#,
             where_clause,
             param_count + 1,
             param_count + 2
         );
 
-        // 总数查询也需要JOIN
+        // 总数查询
         let count_query = format!(
             r#"
-            SELECT COUNT(*) 
-            FROM swap_events se
-            JOIN trading_pairs tp 
-                ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
-            WHERE {}
-            "#,
+        SELECT COUNT(*) 
+        FROM swap_events se
+        JOIN trading_pairs tp 
+            ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
+        WHERE {}
+        "#,
             where_clause
         );
 
@@ -132,10 +154,8 @@ impl WalletOperations {
             let token0_decimals = safe_get_optional_i32(&row, "token0_decimals").unwrap_or(18);
             let token1_decimals = safe_get_optional_i32(&row, "token1_decimals").unwrap_or(18);
 
-            // 直接使用查询结果中的价格，不再进行额外调整
+            // 所有金额都已经过精度转换
             let price = safe_get_decimal(&row, "price");
-
-            // 计算交易金额（用于amount0和amount1字段）
             let amount0_in = safe_get_decimal(&row, "amount0_in");
             let amount1_in = safe_get_decimal(&row, "amount1_in");
             let amount0_out = safe_get_decimal(&row, "amount0_out");
@@ -150,11 +170,12 @@ impl WalletOperations {
                 transaction_hash: safe_get_string(&row, "transaction_hash"),
                 wallet_address: safe_get_string(&row, "wallet_address"),
                 transaction_type: safe_get_string(&row, "transaction_type"),
-                amount0: amount0_in + amount0_out, // 总的token0数量
-                amount1: amount1_in + amount1_out, // 总的token1数量
+                // 金额已经是实际代币数量
+                amount0: amount0_in + amount0_out, // 实际token0数量
+                amount1: amount1_in + amount1_out, // 实际token1数量
                 token0_decimals: Some(token0_decimals),
                 token1_decimals: Some(token1_decimals),
-                price: Some(price), // 使用修复后的价格
+                price: Some(price),
                 value_usd: None,
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
