@@ -41,9 +41,9 @@ use super::ApiResponse;
 /// 返回标准API响应格式，包含交易记录和分页信息
 ///
 /// # 示例请求
-/// \`\`\`
+/// ```
 /// GET /api/wallet/0x123.../transactions?chain_id=1&limit=20&offset=0&transaction_type=swap
-/// \`\`\`
+/// ```
 pub async fn get_wallet_transactions(
     Path(address): Path<String>,
     Query(params): Query<WalletQuery>,
@@ -131,9 +131,9 @@ pub async fn get_wallet_transactions(
 /// 返回标准API响应格式，包含钱包统计信息
 ///
 /// # 示例请求
-/// \`\`\`
+/// ```
 /// GET /api/wallet/0x123.../stats?chain_id=1&days=30
-/// \`\`\`
+/// ```
 pub async fn get_wallet_stats(
     Path(address): Path<String>,
     Query(params): Query<WalletStatsQuery>,

@@ -172,117 +172,117 @@ impl TradingOperations {
         let has_chain_filter = chain_id.unwrap_or(0) != 0;
         let base_query = format!(
             r#"
-    WITH latest_swap AS (
-        SELECT 
-            se.pair_address,
-            se.chain_id,
-            MAX(se.timestamp) as latest_timestamp
-        FROM swap_events se
-        {}
-        GROUP BY se.pair_address, se.chain_id
-    ),
-    price_data AS (
-        SELECT
-            se.pair_address,
-            se.chain_id,
-            MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
-                NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
-            END)::NUMERIC as current_price,
-            MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
-                NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
-            END)::NUMERIC as price_24h_ago
-        FROM swap_events se
-        JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
-        {}
-        GROUP BY se.pair_address, se.chain_id
-    ),
-    pair_stats AS (
-        SELECT 
-            tp.id,
-            tp.address AS pair_address,
-            tp.chain_id,
-            tp.token0,
-            tp.token1,
-            tp.token0_symbol,
-            tp.token1_symbol,
-            tp.token0_decimals,
-            tp.token1_decimals,
-            tp.created_at,
-            ls.latest_timestamp AS last_updated,
-            COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
-            COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
-            COALESCE(
-                ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100, 
-                0
-            )::NUMERIC(38,18) AS price_24h_change,
+            WITH latest_swap AS (
+                SELECT 
+                    se.pair_address,
+                    se.chain_id,
+                    MAX(se.timestamp) as latest_timestamp
+                FROM swap_events se
+                {}
+                GROUP BY se.pair_address, se.chain_id
+            ),
+            price_data AS (
+                SELECT
+                    se.pair_address,
+                    se.chain_id,
+                    MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
+                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
+                    END)::NUMERIC as current_price,
+                    MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
+                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
+                    END)::NUMERIC as price_24h_ago
+                FROM swap_events se
+                JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+                {}
+                GROUP BY se.pair_address, se.chain_id
+            ),
+            pair_stats AS (
+                SELECT 
+                    tp.id,
+                    tp.address AS pair_address,
+                    tp.chain_id,
+                    tp.token0,
+                    tp.token1,
+                    tp.token0_symbol,
+                    tp.token1_symbol,
+                    tp.token0_decimals,
+                    tp.token1_decimals,
+                    tp.created_at,
+                    ls.latest_timestamp AS last_updated,
+                    COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
+                    COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
+                    COALESCE(
+                        ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100, 
+                        0
+                    )::NUMERIC(38,18) AS price_24h_change,
 
-            -- 24h volumes
-            (
-                SELECT COALESCE(SUM(
-                    ((se.amount0_in + se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC)
-                )::NUMERIC, 0)
-                FROM swap_events se 
-                WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
-                AND se.timestamp >= NOW() - INTERVAL '24 hours'
-            ) AS volume_24h_token0,
-            (
-                SELECT COALESCE(SUM(
-                    ((se.amount1_in + se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC)
-                )::NUMERIC, 0)
-                FROM swap_events se 
-                WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
-                AND se.timestamp >= NOW() - INTERVAL '24 hours'
-            ) AS volume_24h_token1,
+                    -- 24h volumes
+                    (
+                        SELECT COALESCE(SUM(
+                            ((se.amount0_in + se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC)
+                        )::NUMERIC, 0)
+                        FROM swap_events se 
+                        WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                        AND se.timestamp >= NOW() - INTERVAL '24 hours'
+                    ) AS volume_24h_token0,
+                    (
+                        SELECT COALESCE(SUM(
+                            ((se.amount1_in + se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC)
+                        )::NUMERIC, 0)
+                        FROM swap_events se 
+                        WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                        AND se.timestamp >= NOW() - INTERVAL '24 hours'
+                    ) AS volume_24h_token1,
 
-            -- 24h tx count
-            (
-                SELECT COUNT(*) FROM swap_events se 
-                WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
-                AND se.timestamp >= NOW() - INTERVAL '24 hours'
-            ) AS tx_count_24h,
+                    -- 24h tx count
+                    (
+                        SELECT COUNT(*) FROM swap_events se 
+                        WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                        AND se.timestamp >= NOW() - INTERVAL '24 hours'
+                    ) AS tx_count_24h,
 
-            -- token0 liquidity
-            (
-                SELECT COALESCE(SUM(
-                    (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
-                )::NUMERIC, 0)
-                FROM mint_events me 
-                WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
-            ) -
-            (
-                SELECT COALESCE(SUM(
-                    (be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
-                )::NUMERIC, 0)
-                FROM burn_events be 
-                WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
-            ) AS liquidity_token0,
+                    -- token0 liquidity
+                    (
+                        SELECT COALESCE(SUM(
+                            (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                        )::NUMERIC, 0)
+                        FROM mint_events me 
+                        WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
+                    ) -
+                    (
+                        SELECT COALESCE(SUM(
+                            (be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                        )::NUMERIC, 0)
+                        FROM burn_events be 
+                        WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
+                    ) AS liquidity_token0,
 
-            -- token1 liquidity
-            (
-                SELECT COALESCE(SUM(
-                    (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
-                )::NUMERIC, 0)
-                FROM mint_events me 
-                WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
-            ) -
-            (
-                SELECT COALESCE(SUM(
-                    (be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
-                )::NUMERIC, 0)
-                FROM burn_events be 
-                WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
-            ) AS liquidity_token1
-        FROM trading_pairs tp
-        LEFT JOIN latest_swap ls ON tp.address = ls.pair_address AND tp.chain_id = ls.chain_id
-        LEFT JOIN price_data pd ON tp.address = pd.pair_address AND tp.chain_id = pd.chain_id
-        {}
-    )
-    SELECT * FROM pair_stats
-    ORDER BY volume_24h_token0 DESC
-    LIMIT ${} OFFSET ${}
-    "#,
+                    -- token1 liquidity
+                    (
+                        SELECT COALESCE(SUM(
+                            (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                        )::NUMERIC, 0)
+                        FROM mint_events me 
+                        WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
+                    ) -
+                    (
+                        SELECT COALESCE(SUM(
+                            (be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                        )::NUMERIC, 0)
+                        FROM burn_events be 
+                        WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
+                    ) AS liquidity_token1
+                FROM trading_pairs tp
+                LEFT JOIN latest_swap ls ON tp.address = ls.pair_address AND tp.chain_id = ls.chain_id
+                LEFT JOIN price_data pd ON tp.address = pd.pair_address AND tp.chain_id = pd.chain_id
+                {}
+            )
+            SELECT * FROM pair_stats
+            ORDER BY volume_24h_token0 DESC
+            LIMIT ${} OFFSET ${}
+            "#,
             if has_chain_filter {
                 "WHERE se.chain_id = $1"
             } else {
