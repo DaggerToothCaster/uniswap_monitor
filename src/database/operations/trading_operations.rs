@@ -518,52 +518,75 @@ impl TradingOperations {
         offset: Option<i32>,
     ) -> Result<(Vec<TradeRecord>, i64), sqlx::Error> {
         let query = r#"
-            WITH trades AS (
-                SELECT 
-                    se.id,
-                    se.chain_id,
-                    se.pair_address,
-                    tp.token0_symbol,
-                    tp.token1_symbol,
-                    tp.token0_decimals,
-                    tp.token1_decimals,
-                    se.transaction_hash,
-                    se.sender,
-                    se.to_address,
-                    se.amount0_in,
-                    se.amount1_in,
-                    se.amount0_out,
-                    se.amount1_out,
-                    CASE 
-                        WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
-                            (se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC /
-                            NULLIF((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC, 0)
-                        WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
-                            (se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC /
-                            NULLIF((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC, 0)
-                        ELSE 0
-                    END::NUMERIC(38,18) AS price,
-                    CASE 
-                        WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 'buy'
-                        WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 'sell'
-                        ELSE 'unknown'
-                    END AS trade_type,
-                    se.block_number,
-                    se.timestamp
-                FROM swap_events se
-                LEFT JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
-                WHERE se.pair_address = $1 AND se.chain_id = $2
-            )
-            SELECT * FROM trades
-            ORDER BY timestamp DESC
-            LIMIT $3 OFFSET $4
-        "#;
+        WITH trades AS (
+            SELECT 
+                se.id,
+                se.chain_id,
+                se.pair_address,
+                tp.token0_symbol,
+                tp.token1_symbol,
+                tp.token0_decimals,
+                tp.token1_decimals,
+                se.transaction_hash,
+                se.sender,
+                se.to_address,
+                -- 交易金额：转换为实际代币数量（除以精度）
+                CASE 
+                    WHEN tp.token0_decimals IS NOT NULL THEN
+                        (se.amount0_in)::NUMERIC / POWER(10, tp.token0_decimals)::NUMERIC
+                    ELSE
+                        (se.amount0_in)::NUMERIC / POWER(10, 18)::NUMERIC
+                END AS amount0_in,
+                CASE 
+                    WHEN tp.token1_decimals IS NOT NULL THEN
+                        (se.amount1_in)::NUMERIC / POWER(10, tp.token1_decimals)::NUMERIC
+                    ELSE
+                        (se.amount1_in)::NUMERIC / POWER(10, 18)::NUMERIC
+                END AS amount1_in,
+                CASE 
+                    WHEN tp.token0_decimals IS NOT NULL THEN
+                        (se.amount0_out)::NUMERIC / POWER(10, tp.token0_decimals)::NUMERIC
+                    ELSE
+                        (se.amount0_out)::NUMERIC / POWER(10, 18)::NUMERIC
+                END AS amount0_out,
+                CASE 
+                    WHEN tp.token1_decimals IS NOT NULL THEN
+                        (se.amount1_out)::NUMERIC / POWER(10, tp.token1_decimals)::NUMERIC
+                    ELSE
+                        (se.amount1_out)::NUMERIC / POWER(10, 18)::NUMERIC
+                END AS amount1_out,
+                -- 价格计算：基于转换后的金额
+                CASE 
+                    WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                    WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
+                        ((se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                        NULLIF(((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                    ELSE 0
+                END::NUMERIC(38,18) AS price,
+                -- 交易类型
+                CASE 
+                    WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 'buy'
+                    WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 'sell'
+                    ELSE 'unknown'
+                END AS trade_type,
+                se.block_number,
+                se.timestamp
+            FROM swap_events se
+            LEFT JOIN trading_pairs tp ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
+            WHERE se.pair_address = $1 AND se.chain_id = $2
+        )
+        SELECT * FROM trades
+        ORDER BY timestamp DESC
+        LIMIT $3 OFFSET $4
+    "#;
 
         let count_query = r#"
-            SELECT COUNT(*) 
-            FROM swap_events 
-            WHERE pair_address = $1 AND chain_id = $2
-        "#;
+        SELECT COUNT(*) 
+        FROM swap_events 
+        WHERE pair_address = $1 AND chain_id = $2
+    "#;
 
         // 获取总记录数
         let total: i64 = sqlx::query_scalar(count_query)
@@ -576,7 +599,7 @@ impl TradingOperations {
         let rows = sqlx::query(query)
             .bind(pair_address)
             .bind(chain_id)
-            .bind(limit.unwrap_or(i32::MAX))
+            .bind(limit.unwrap_or(50))
             .bind(offset.unwrap_or(0))
             .fetch_all(pool)
             .await?;
@@ -594,13 +617,14 @@ impl TradingOperations {
                 transaction_hash: safe_get_string(&row, "transaction_hash"),
                 sender: safe_get_string(&row, "sender"),
                 to_address: safe_get_string(&row, "to_address"),
+                // 所有金额都已经转换为实际代币数量
                 amount0_in: safe_get_decimal(&row, "amount0_in"),
                 amount1_in: safe_get_decimal(&row, "amount1_in"),
                 amount0_out: safe_get_decimal(&row, "amount0_out"),
                 amount1_out: safe_get_decimal(&row, "amount1_out"),
                 price: safe_get_decimal(&row, "price"),
                 trade_type: safe_get_string(&row, "trade_type"),
-                volume_usd: None, // 直接设为None
+                volume_usd: None,
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
             });
