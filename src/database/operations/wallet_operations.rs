@@ -3,22 +3,23 @@ use crate::types::WalletTransaction;
 use crate::types::*;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 pub struct WalletOperations;
 
 impl WalletOperations {
+    /// 获取钱包交易记录（带分页，修复价格计算）
     pub async fn get_wallet_transactions(
         pool: &PgPool,
         wallet_address: &str,
         chain_id: Option<i32>,
-        limit: i32,
-        offset: i32,
+        limit: Option<i32>,
+        offset: Option<i32>,
         transaction_type: Option<&str>,
-    ) -> Result<Vec<WalletTransaction>, sqlx::Error> {
+    ) -> Result<(Vec<WalletTransaction>, i64), sqlx::Error> {
         let mut conditions = vec!["(se.sender = $1 OR se.to_address = $1)".to_string()];
         let mut param_count = 1;
 
@@ -27,65 +28,101 @@ impl WalletOperations {
             conditions.push(format!("se.chain_id = ${}", param_count));
         }
 
+        // 根据交易类型过滤
         if let Some(tx_type) = transaction_type {
             match tx_type {
-                "swap" => {}
-                "mint" | "burn" => {
-                    return Ok(vec![]);
+                "swap" => {
+                    // swap事件已经是默认的，不需要额外过滤
                 }
-                _ => {}
+                "mint" | "burn" => {
+                    // 如果需要mint/burn事件，需要查询不同的表
+                    return Ok((vec![], 0));
+                }
+                _ => {
+                    return Ok((vec![], 0));
+                }
             }
         }
 
         let where_clause = conditions.join(" AND ");
 
+        // 修复后的主查询 - 参考get_pair_trades的价格计算逻辑
         let query = format!(
             r#"
-    SELECT 
-        se.id,
-        se.chain_id,
-        se.pair_address,
-        tp.token0_symbol,
-        tp.token1_symbol,
-        tp.token0_decimals,
-        tp.token1_decimals,
-        se.transaction_hash,
-        $1 as wallet_address,
-        'swap' as transaction_type,
-        (se.amount0_in + se.amount0_out)::numeric as amount0,
-        (se.amount1_in + se.amount1_out)::numeric as amount1,
-        CASE 
-            WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                ((se.amount0_in::numeric / power(10, COALESCE(tp.token0_decimals, 18))) / 
-                 (se.amount1_out::numeric / power(10, COALESCE(tp.token1_decimals, 18))))
-            WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 
-                ((se.amount0_out::numeric / power(10, COALESCE(tp.token0_decimals, 18))) / 
-                 (se.amount1_in::numeric / power(10, COALESCE(tp.token1_decimals, 18))))
-            ELSE 0
-        END as price,
-        se.block_number,
-        se.timestamp
-    FROM swap_events se
-    LEFT JOIN trading_pairs tp 
-        ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
-    WHERE {}
-    ORDER BY se.timestamp DESC
-    LIMIT ${} OFFSET ${}
-    "#,
+            SELECT 
+                se.id,
+                se.chain_id,
+                se.pair_address,
+                tp.token0_symbol,
+                tp.token1_symbol,
+                tp.token0_decimals,
+                tp.token1_decimals,
+                se.transaction_hash,
+                $1 as wallet_address,
+                'swap' as transaction_type,
+                se.amount0_in,
+                se.amount1_in,
+                se.amount0_out,
+                se.amount1_out,
+                -- 修复价格计算逻辑，参考get_pair_trades
+                CASE 
+                    WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                        (se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC /
+                        NULLIF((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC, 0)
+                    WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
+                        (se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC /
+                        NULLIF((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC, 0)
+                    ELSE 0
+                END::NUMERIC(38,18) as price,
+                -- 交易类型判断
+                CASE 
+                    WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 'buy'
+                    WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN 'sell'
+                    ELSE 'unknown'
+                END as trade_type,
+                se.block_number,
+                se.timestamp
+            FROM swap_events se
+            -- 使用JOIN而不是LEFT JOIN确保能获取到交易对信息
+            JOIN trading_pairs tp 
+                ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
+            WHERE {}
+            ORDER BY se.timestamp DESC
+            LIMIT ${} OFFSET ${}
+            "#,
             where_clause,
             param_count + 1,
             param_count + 2
         );
 
-        let mut query_builder = sqlx::query(&query).bind(wallet_address);
+        // 总数查询也需要JOIN
+        let count_query = format!(
+            r#"
+            SELECT COUNT(*) 
+            FROM swap_events se
+            JOIN trading_pairs tp 
+                ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
+            WHERE {}
+            "#,
+            where_clause
+        );
 
+        // 获取总记录数
+        let mut count_query_builder = sqlx::query_scalar(&count_query).bind(wallet_address);
+        if let Some(chain_id) = chain_id {
+            count_query_builder = count_query_builder.bind(chain_id);
+        }
+        let total: i64 = count_query_builder.fetch_one(pool).await?;
+
+        // 获取分页数据
+        let mut query_builder = sqlx::query(&query).bind(wallet_address);
         if let Some(chain_id) = chain_id {
             query_builder = query_builder.bind(chain_id);
         }
 
         let rows = query_builder
-            .bind(limit)
-            .bind(offset)
+            .bind(limit.unwrap_or(50))
+            .bind(offset.unwrap_or(0))
             .fetch_all(pool)
             .await?;
 
@@ -95,11 +132,14 @@ impl WalletOperations {
             let token0_decimals = safe_get_optional_i32(&row, "token0_decimals").unwrap_or(18);
             let token1_decimals = safe_get_optional_i32(&row, "token1_decimals").unwrap_or(18);
 
-            let raw_price = safe_get_decimal(&row, "price");
-            let decimals_adjustment =
-                Decimal::from_f64(10f64.powi((token1_decimals - token0_decimals) as i32))
-                    .unwrap_or(Decimal::ONE);
-            let adjusted_price = raw_price * decimals_adjustment;
+            // 直接使用查询结果中的价格，不再进行额外调整
+            let price = safe_get_decimal(&row, "price");
+
+            // 计算交易金额（用于amount0和amount1字段）
+            let amount0_in = safe_get_decimal(&row, "amount0_in");
+            let amount1_in = safe_get_decimal(&row, "amount1_in");
+            let amount0_out = safe_get_decimal(&row, "amount0_out");
+            let amount1_out = safe_get_decimal(&row, "amount1_out");
 
             transactions.push(WalletTransaction {
                 id: safe_get_uuid(&row, "id"),
@@ -110,26 +150,27 @@ impl WalletOperations {
                 transaction_hash: safe_get_string(&row, "transaction_hash"),
                 wallet_address: safe_get_string(&row, "wallet_address"),
                 transaction_type: safe_get_string(&row, "transaction_type"),
-                amount0: safe_get_decimal(&row, "amount0"),
-                amount1: safe_get_decimal(&row, "amount1"),
+                amount0: amount0_in + amount0_out, // 总的token0数量
+                amount1: amount1_in + amount1_out, // 总的token1数量
                 token0_decimals: Some(token0_decimals),
                 token1_decimals: Some(token1_decimals),
-                price: Some(adjusted_price),
+                price: Some(price), // 使用修复后的价格
                 value_usd: None,
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
             });
         }
 
-        Ok(transactions)
+        Ok((transactions, total))
     }
 
+    /// 获取钱包统计信息（保持不变）
     pub async fn get_wallet_stats(
         pool: &PgPool,
         wallet_address: &str,
         chain_id: Option<i32>,
         days: i32,
-    ) -> Result<Option<WalletStats>> {
+    ) -> Result<Option<WalletStats>, sqlx::Error> {
         let chain_filter = if let Some(chain_id) = chain_id {
             format!("AND se.chain_id = {}", chain_id)
         } else {
@@ -138,39 +179,43 @@ impl WalletOperations {
 
         let query = format!(
             r#"
-        WITH wallet_activity AS (
+            WITH wallet_activity AS (
+                SELECT 
+                    COUNT(*) as total_transactions,
+                    COALESCE(SUM(
+                        CASE 
+                            WHEN se.amount0_in > 0 THEN 
+                                (se.amount0_in::numeric / power(10, COALESCE(tp.token0_decimals, 18)))
+                            WHEN se.amount1_in > 0 THEN 
+                                (se.amount1_in::numeric / power(10, COALESCE(tp.token1_decimals, 18)))
+                            ELSE 0
+                        END
+                    ), 0) as total_volume,
+                    MIN(se.timestamp) as first_transaction,
+                    MAX(se.timestamp) as last_transaction
+                FROM swap_events se
+                LEFT JOIN trading_pairs tp 
+                    ON tp.address = se.pair_address AND tp.chain_id = se.chain_id
+                WHERE (se.sender = $1 OR se.to_address = $1)
+                AND se.timestamp >= NOW() - INTERVAL '1 day' * $2
+                {}
+            )
             SELECT 
-                COUNT(*) as total_transactions,
-                SUM(
-                    CASE 
-                        WHEN se.amount0_in > 0 THEN se.amount0_in
-                        WHEN se.amount1_in > 0 THEN se.amount1_in  
-                        ELSE 0
-                    END
-                ) as total_volume_usd,
-                MIN(se.timestamp) as first_transaction,
-                MAX(se.timestamp) as last_transaction
-            FROM swap_events se
-            WHERE (se.sender = $1 OR se.to_address = $1)
-            AND se.timestamp >= NOW() - INTERVAL '1 day' * $2
-            {}
-        )
-        SELECT 
-            $1 as wallet_address,
-            {} as chain_id,
-            COALESCE(total_transactions, 0) as total_transactions,
-            COALESCE(total_volume_usd, 0) as total_volume_usd,
-            0 as total_fees_paid,
-            0 as profit_loss,
-            0 as win_rate,
-            CASE 
-                WHEN total_transactions > 0 THEN total_volume_usd / total_transactions
-                ELSE 0
-            END as avg_trade_size,
-            first_transaction,
-            last_transaction
-        FROM wallet_activity
-        "#,
+                $1 as wallet_address,
+                {} as chain_id,
+                COALESCE(total_transactions, 0) as total_transactions,
+                COALESCE(total_volume, 0) as total_volume_usd,
+                0::numeric as total_fees_paid,
+                0::numeric as profit_loss,
+                0::numeric as win_rate,
+                CASE 
+                    WHEN total_transactions > 0 THEN total_volume / total_transactions
+                    ELSE 0
+                END as avg_trade_size,
+                first_transaction,
+                last_transaction
+            FROM wallet_activity
+            "#,
             chain_filter,
             chain_id
                 .map(|c| c.to_string())
