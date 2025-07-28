@@ -7,7 +7,102 @@ use anyhow::Result;
 use rust_decimal::Decimal;
 use sqlx::query_as;
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use tracing::info;
+
+// 时间间隔配置结构
+#[derive(Debug)]
+struct IntervalConfig {
+    time_bucket_expr: &'static str,
+    time_range: &'static str,
+    default_limit: i32,
+}
+
+impl IntervalConfig {
+    fn get_config() -> HashMap<&'static str, IntervalConfig> {
+        let mut config = HashMap::new();
+
+        config.insert(
+            "1m",
+            IntervalConfig {
+                time_bucket_expr: "date_trunc('minute', timestamp)",
+                time_range: "1 day",
+                default_limit: 1440,
+            },
+        );
+
+        config.insert("5m", IntervalConfig {
+            time_bucket_expr: "date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5)",
+            time_range: "3 days",
+            default_limit: 864,
+        });
+
+        config.insert("15m", IntervalConfig {
+            time_bucket_expr: "date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15)",
+            time_range: "7 days",
+            default_limit: 672,
+        });
+
+        config.insert("30m", IntervalConfig {
+            time_bucket_expr: "date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30)",
+            time_range: "14 days",
+            default_limit: 672,
+        });
+
+        config.insert(
+            "1h",
+            IntervalConfig {
+                time_bucket_expr: "date_trunc('hour', timestamp)",
+                time_range: "30 days",
+                default_limit: 720,
+            },
+        );
+
+        config.insert("4h", IntervalConfig {
+            time_bucket_expr: "date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4)",
+            time_range: "90 days",
+            default_limit: 540,
+        });
+
+        config.insert(
+            "1d",
+            IntervalConfig {
+                time_bucket_expr: "date_trunc('day', timestamp)",
+                time_range: "1 year",
+                default_limit: 365,
+            },
+        );
+
+        config.insert(
+            "1w",
+            IntervalConfig {
+                time_bucket_expr: "date_trunc('week', timestamp)",
+                time_range: "2 years",
+                default_limit: 104,
+            },
+        );
+
+        config.insert(
+            "1M",
+            IntervalConfig {
+                time_bucket_expr: "date_trunc('month', timestamp)",
+                time_range: "5 years",
+                default_limit: 60,
+            },
+        );
+
+        config.insert(
+            "1y",
+            IntervalConfig {
+                time_bucket_expr: "date_trunc('year', timestamp)",
+                time_range: "10 years",
+                default_limit: 10,
+            },
+        );
+
+        config
+    }
+}
 
 pub struct TradingOperations;
 
@@ -623,905 +718,6 @@ impl TradingOperations {
         }
     }
 
-    // K线数据查询 - 正确处理价格计算逻辑
-    pub async fn get_kline_data(
-        pool: &PgPool,
-        pair_address: &str,
-        chain_id: i32,
-        interval: &str,
-        limit: i32,
-    ) -> Result<Vec<KLineData>> {
-        // 根据不同的时间区间使用不同的查询
-        let (query, _interval_param) = match interval {
-            "1m" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('minute', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '1 day'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "1 day",
-            ),
-            "5m" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '3 days'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "3 days",
-            ),
-            "15m" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 15) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '7 days'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "7 days",
-            ),
-            "30m" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 30) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '14 days'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "14 days",
-            ),
-            "1h" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('hour', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '30 days'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "30 days",
-            ),
-            "4h" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) - INTERVAL '1 hour' * (EXTRACT(hour FROM timestamp)::int % 4) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '90 days'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "90 days",
-            ),
-            "1d" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('day', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('day', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('day', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '1 year'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "1 year",
-            ),
-            "1w" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('week', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('week', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('week', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '2 years'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "2 years",
-            ),
-            "1M" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('month', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('month', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('month', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '5 years'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "5 years",
-            ),
-            "1y" => (
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('year', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('year', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('year', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            WHERE time_bucket >= NOW() - INTERVAL '5 years'
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "all time",
-            ),
-            _ => (
-                // 默认使用1小时
-                r#"
-            WITH time_series AS (
-                SELECT 
-                    date_trunc('hour', timestamp) as time_bucket,
-                    CASE 
-                        WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-                        WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-                        ELSE 0
-                    END as price,
-                    CASE 
-                        WHEN amount0_in > 0 THEN amount0_in
-                        WHEN amount1_in > 0 THEN amount1_in  
-                        ELSE 0
-                    END as volume,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp ASC) as rn_first,
-                    ROW_NUMBER() OVER (PARTITION BY date_trunc('hour', timestamp) ORDER BY timestamp DESC) as rn_last
-                FROM swap_events 
-                WHERE pair_address = $1 AND chain_id = $2
-                AND timestamp >= NOW() - INTERVAL '30 days'
-                AND (
-                    (amount0_in > 0 AND amount1_out > 0) OR 
-                    (amount1_in > 0 AND amount0_out > 0)
-                )
-            ),
-            kline_raw AS (
-                SELECT 
-                    time_bucket,
-                    MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
-                    MAX(price) as high_price,
-                    MIN(price) as low_price,
-                    MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
-                    SUM(volume) as total_volume,
-                    COUNT(*) as trade_count
-                FROM time_series
-                WHERE price > 0
-                GROUP BY time_bucket
-            ),
-            kline_with_continuity AS (
-                SELECT 
-                    time_bucket,
-                    -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
-                    CASE 
-                        WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL 
-                        THEN first_price 
-                        ELSE LAG(close_price) OVER (ORDER BY time_bucket)
-                    END as open_price,
-                    high_price,
-                    low_price,
-                    close_price,
-                    total_volume,
-                    trade_count
-                FROM kline_raw
-                WHERE first_price IS NOT NULL AND close_price IS NOT NULL
-            )
-            SELECT 
-                time_bucket as timestamp,
-                COALESCE(open_price, 0) as open,
-                COALESCE(high_price, 0) as high,
-                COALESCE(low_price, 0) as low,
-                COALESCE(close_price, 0) as close,
-                COALESCE(total_volume, 0) as volume,
-                COALESCE(trade_count, 0) as trade_count
-            FROM kline_with_continuity
-            ORDER BY time_bucket DESC
-            LIMIT $3
-            "#,
-                "30 days",
-            ),
-        };
-
-        let rows = sqlx::query(query)
-            .bind(pair_address)
-            .bind(chain_id)
-            .bind(limit)
-            .fetch_all(pool)
-            .await?;
-
-        let mut klines = Vec::new();
-        for row in rows {
-            klines.push(KLineData {
-                timestamp: safe_get_datetime(&row, "timestamp"),
-                open: safe_get_decimal(&row, "open"),
-                high: safe_get_decimal(&row, "high"),
-                low: safe_get_decimal(&row, "low"),
-                close: safe_get_decimal(&row, "close"),
-                volume: safe_get_decimal(&row, "volume"),
-                trade_count: safe_get_i64(&row, "trade_count"),
-            });
-        }
-
-        Ok(klines)
-    }
-
-    pub async fn get_timeseries_data(
-        pool: &PgPool,
-        pair_address: &str,
-        chain_id: i32,
-        hours: i32,
-    ) -> Result<Vec<TimeSeriesData>> {
-        // 首先获取交易对的代币精度信息
-        let decimals_query = r#"
-    SELECT token0_decimals, token1_decimals 
-    FROM trading_pairs 
-    WHERE address = $1 AND chain_id = $2
-    "#;
-
-        let decimals = sqlx::query(decimals_query)
-            .bind(pair_address)
-            .bind(chain_id)
-            .fetch_optional(pool)
-            .await?;
-
-        let (token0_decimals, token1_decimals) = match decimals {
-            Some(row) => (
-                row.try_get::<i32, _>("token0_decimals").unwrap_or(18),
-                row.try_get::<i32, _>("token1_decimals").unwrap_or(18),
-            ),
-            None => (18, 18), // 默认精度为18
-        };
-
-        let query = r#"
-    SELECT 
-        timestamp,
-        CASE 
-            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-            ELSE 0
-        END as price,
-        CASE 
-            WHEN amount0_in > 0 THEN amount0_in
-            WHEN amount1_in > 0 THEN amount1_in  
-            ELSE 0
-        END as raw_volume,
-        CASE 
-            WHEN amount0_in > 0 THEN 0  
-            WHEN amount1_in > 0 THEN 1  
-            ELSE -1
-        END as volume_token_index
-    FROM swap_events 
-    WHERE pair_address = $1 AND chain_id = $2
-    AND timestamp >= NOW() - INTERVAL '1 hour' * $3
-    AND (
-        (amount0_in > 0 AND amount1_out > 0) OR 
-        (amount1_in > 0 AND amount0_out > 0)
-    )
-    AND (
-        CASE 
-            WHEN amount0_in > 0 AND amount1_out > 0 THEN amount0_in / amount1_out
-            WHEN amount1_in > 0 AND amount0_out > 0 THEN amount0_out / amount1_in
-            ELSE 0
-        END
-    ) > 0
-    ORDER BY timestamp ASC
-    "#;
-
-        let rows = sqlx::query(query)
-            .bind(pair_address)
-            .bind(chain_id)
-            .bind(hours)
-            .fetch_all(pool)
-            .await?;
-
-        let mut timeseries = Vec::new();
-        for row in rows {
-            let raw_volume = safe_get_decimal(&row, "raw_volume");
-            let token_index = row.get::<i32, _>("volume_token_index");
-
-            // 根据交易使用的代币去除精度
-            let volume = if token_index == 0 {
-                raw_volume / Decimal::from(10u64.pow(token0_decimals as u32))
-            } else if token_index == 1 {
-                raw_volume / Decimal::from(10u64.pow(token1_decimals as u32))
-            } else {
-                Decimal::ZERO
-            };
-
-            timeseries.push(TimeSeriesData {
-                timestamp: safe_get_datetime(&row, "timestamp"),
-                price: safe_get_decimal(&row, "price"),
-                volume: volume.round_dp(0), // 四舍五入到整数
-            });
-        }
-
-        Ok(timeseries)
-    }
-
     // 获取流动性事件
     pub async fn get_pair_liquidity_events(
         pool: &PgPool,
@@ -1624,5 +820,297 @@ impl TradingOperations {
         }
 
         Ok((liquidity_records, total))
+    }
+
+    // 修复精度处理的K线数据查询函数
+    pub async fn get_kline_data(
+        pool: &PgPool,
+        pair_address: &str,
+        chain_id: i32,
+        interval: &str,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<(Vec<KLineData>, i64), sqlx::Error> {
+        let config_map = IntervalConfig::get_config();
+        let config = config_map
+            .get(interval)
+            .unwrap_or(config_map.get("1h").unwrap());
+
+        // 构建修复精度处理的动态SQL查询
+        let query = format!(
+            r#"
+        WITH time_series AS (
+            SELECT 
+                {} as time_bucket,
+                -- 修复价格计算：加入代币精度处理，参考get_pair_detail的逻辑
+                CASE 
+                    WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                    WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
+                        ((se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                        NULLIF(((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                    ELSE 0
+                END as price,
+                -- 修复成交量计算：加入代币精度处理
+                CASE 
+                    WHEN se.amount0_in > 0 THEN 
+                        (se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                    WHEN se.amount1_in > 0 THEN 
+                        (se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                    ELSE 0
+                END as volume,
+                se.timestamp,
+                ROW_NUMBER() OVER (PARTITION BY {} ORDER BY se.timestamp ASC) as rn_first,
+                ROW_NUMBER() OVER (PARTITION BY {} ORDER BY se.timestamp DESC) as rn_last
+            FROM swap_events se
+            -- 必须JOIN trading_pairs表来获取代币精度信息
+            JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+            WHERE se.pair_address = $1 AND se.chain_id = $2
+            AND se.timestamp >= NOW() - INTERVAL '{}'
+            AND (
+                (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+                (se.amount1_in > 0 AND se.amount0_out > 0)
+            )
+        ),
+        kline_raw AS (
+            SELECT 
+                time_bucket,
+                MAX(CASE WHEN rn_first = 1 THEN price END) as first_price,
+                MAX(price) as high_price,
+                MIN(price) as low_price,
+                MAX(CASE WHEN rn_last = 1 THEN price END) as close_price,
+                SUM(volume) as total_volume,
+                COUNT(*) as trade_count
+            FROM time_series
+            WHERE price > 0
+            GROUP BY time_bucket
+        ),
+        kline_with_continuity AS (
+            SELECT 
+                time_bucket,
+                -- 开盘价：第一个K线使用实际第一笔交易价格，后续使用前一个K线的收盘价
+                CASE 
+                    WHEN LAG(close_price) OVER (ORDER BY time_bucket) IS NULL
+                    THEN first_price
+                    ELSE LAG(close_price) OVER (ORDER BY time_bucket)
+                END as open_price,
+                high_price,
+                low_price,
+                close_price,
+                total_volume,
+                trade_count
+            FROM kline_raw
+            WHERE first_price IS NOT NULL AND close_price IS NOT NULL
+        )
+        SELECT 
+            time_bucket as timestamp,
+            COALESCE(open_price, 0)::NUMERIC(38,18) as open,
+            COALESCE(high_price, 0)::NUMERIC(38,18) as high,
+            COALESCE(low_price, 0)::NUMERIC(38,18) as low,
+            COALESCE(close_price, 0)::NUMERIC(38,18) as close,
+            COALESCE(total_volume, 0)::NUMERIC(38,18) as volume,
+            COALESCE(trade_count, 0) as trade_count
+        FROM kline_with_continuity
+        ORDER BY time_bucket DESC
+        LIMIT $3 OFFSET $4
+    "#,
+            config.time_bucket_expr,
+            config.time_bucket_expr,
+            config.time_bucket_expr,
+            config.time_range
+        );
+
+        // 总数查询
+        let count_query = format!(
+            r#"
+        WITH time_buckets AS (
+            SELECT DISTINCT {} as time_bucket
+            FROM swap_events se
+            JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+            WHERE se.pair_address = $1 AND se.chain_id = $2
+            AND se.timestamp >= NOW() - INTERVAL '{}'
+            AND (
+                (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+                (se.amount1_in > 0 AND se.amount0_out > 0)
+            )
+        )
+        SELECT COUNT(*) FROM time_buckets
+    "#,
+            config.time_bucket_expr, config.time_range
+        );
+
+        // 获取总记录数
+        let total: i64 = sqlx::query_scalar(&count_query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .fetch_one(pool)
+            .await?;
+
+        // 获取分页数据
+        let rows = sqlx::query(&query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .bind(limit.unwrap_or(config.default_limit))
+            .bind(offset.unwrap_or(0))
+            .fetch_all(pool)
+            .await?;
+
+        let mut klines = Vec::new();
+        for row in rows {
+            klines.push(KLineData {
+                timestamp: safe_get_datetime(&row, "timestamp"),
+                open: safe_get_decimal(&row, "open"),
+                high: safe_get_decimal(&row, "high"),
+                low: safe_get_decimal(&row, "low"),
+                close: safe_get_decimal(&row, "close"),
+                volume: safe_get_decimal(&row, "volume"),
+                trade_count: safe_get_i64(&row, "trade_count"),
+            });
+        }
+
+        Ok((klines, total))
+    }
+
+    // 修复精度处理的时间序列数据查询
+    pub async fn get_timeseries_data(
+        pool: &PgPool,
+        pair_address: &str,
+        chain_id: i32,
+        hours: i32,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<(Vec<TimeSeriesData>, i64), sqlx::Error> {
+        let query = r#"
+        SELECT 
+            se.timestamp,
+            -- 修复价格计算：加入代币精度处理
+            CASE 
+                WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
+                    ((se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                ELSE 0
+            END::NUMERIC(38,18) as price,
+            -- 修复成交量计算：加入代币精度处理
+            CASE 
+                WHEN se.amount0_in > 0 THEN 
+                    (se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                WHEN se.amount1_in > 0 THEN 
+                    (se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                ELSE 0
+            END::NUMERIC(38,18) as volume
+        FROM swap_events se
+        -- 必须JOIN trading_pairs表来获取代币精度信息
+        JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+        WHERE se.pair_address = $1 AND se.chain_id = $2
+        AND se.timestamp >= NOW() - INTERVAL '1 hour' * $3
+        AND (
+            (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+            (se.amount1_in > 0 AND se.amount0_out > 0)
+        )
+        AND (
+            CASE 
+                WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                WHEN se.amount1_in > 0 AND se.amount0_out > 0 THEN
+                    ((se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_in)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                ELSE 0
+            END
+        ) > 0
+        ORDER BY se.timestamp ASC
+        LIMIT $4 OFFSET $5
+    "#;
+
+        let count_query = r#"
+        SELECT COUNT(*) 
+        FROM swap_events se
+        JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+        WHERE se.pair_address = $1 AND se.chain_id = $2
+        AND se.timestamp >= NOW() - INTERVAL '1 hour' * $3
+        AND (
+            (se.amount0_in > 0 AND se.amount1_out > 0) OR 
+            (se.amount1_in > 0 AND se.amount0_out > 0)
+        )
+    "#;
+
+        // 获取总记录数
+        let total: i64 = sqlx::query_scalar(count_query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .bind(hours)
+            .fetch_one(pool)
+            .await?;
+
+        // 获取分页数据
+        let rows = sqlx::query(query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .bind(hours)
+            .bind(limit.unwrap_or(1000))
+            .bind(offset.unwrap_or(0))
+            .fetch_all(pool)
+            .await?;
+
+        let mut timeseries = Vec::new();
+        for row in rows {
+            timeseries.push(TimeSeriesData {
+                timestamp: safe_get_datetime(&row, "timestamp"),
+                price: safe_get_decimal(&row, "price"),
+                volume: safe_get_decimal(&row, "volume"),
+            });
+        }
+
+        Ok((timeseries, total))
+    }
+
+    // 辅助函数：批量处理K线数据（如果需要在Rust中进行后处理）
+    pub fn process_kline_continuity(mut klines: Vec<KLineData>) -> Vec<KLineData> {
+        if klines.is_empty() {
+            return klines;
+        }
+
+        // 按时间排序（升序）
+        klines.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        // 处理开盘价连续性
+        for i in 1..klines.len() {
+            if klines[i].open == Decimal::ZERO {
+                klines[i].open = klines[i - 1].close;
+            }
+        }
+
+        // 重新按时间降序排列
+        klines.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        klines
+    }
+
+    // 可选：添加价格验证函数
+    pub fn validate_price_data(klines: &mut Vec<KLineData>) {
+        for kline in klines.iter_mut() {
+            // 确保OHLC数据的逻辑正确性
+            if kline.high < kline.low {
+                std::mem::swap(&mut kline.high, &mut kline.low);
+            }
+
+            // 确保开盘价和收盘价在高低价范围内
+            if kline.open > kline.high {
+                kline.high = kline.open;
+            }
+            if kline.open < kline.low {
+                kline.low = kline.open;
+            }
+            if kline.close > kline.high {
+                kline.high = kline.close;
+            }
+            if kline.close < kline.low {
+                kline.low = kline.close;
+            }
+        }
     }
 }
