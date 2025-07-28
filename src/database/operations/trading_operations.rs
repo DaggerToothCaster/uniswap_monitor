@@ -26,14 +26,14 @@ impl IntervalConfig {
             "1m",
             IntervalConfig {
                 time_bucket_expr: "date_trunc('minute', timestamp)",
-                time_range: "1 day",
+                time_range: "7 day",
                 default_limit: 1440,
             },
         );
 
         config.insert("5m", IntervalConfig {
             time_bucket_expr: "date_trunc('minute', timestamp) - INTERVAL '1 minute' * (EXTRACT(minute FROM timestamp)::int % 5)",
-            time_range: "3 days",
+            time_range: "7 days",
             default_limit: 864,
         });
 
@@ -743,6 +743,7 @@ impl TradingOperations {
     }
 
     // 获取流动性事件
+    // 获取流动性事件（去掉代币精度 + NOS定价）
     pub async fn get_pair_liquidity_events(
         pool: &PgPool,
         pair_address: &str,
@@ -751,7 +752,15 @@ impl TradingOperations {
         offset: Option<i32>,
     ) -> Result<(Vec<LiquidityRecord>, i64), sqlx::Error> {
         let query = r#"
-        WITH liquidity_events AS (
+        WITH nos_price AS (
+            SELECT 
+                price_usd as nos_price_usd
+            FROM token_prices 
+            WHERE UPPER(token_symbol) = 'NOS'
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ),
+        liquidity_events AS (
             SELECT 
                 me.id,
                 me.chain_id,
@@ -763,13 +772,26 @@ impl TradingOperations {
                 me.transaction_hash,
                 me.sender,
                 NULL as to_address,
-                me.amount0,
-                me.amount1,
+                -- 对金额进行精度转换
+                (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC AS amount0,
+                (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC AS amount1,
                 'mint' as liquidity_type,
                 me.block_number,
-                me.timestamp
+                me.timestamp,
+                -- 计算USD价值（如果包含NOS）- 使用LEFT JOIN避免空结果
+                CASE 
+                    WHEN UPPER(tp.token0_symbol) = 'NOS' AND np.nos_price_usd IS NOT NULL THEN
+                        ((me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) * 
+                        np.nos_price_usd * 2  -- 乘以2因为是总流动性
+                    WHEN UPPER(tp.token1_symbol) = 'NOS' AND np.nos_price_usd IS NOT NULL THEN
+                        ((me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC) * 
+                        np.nos_price_usd * 2  -- 乘以2因为是总流动性
+                    ELSE
+                        NULL
+                END AS value_usd
             FROM mint_events me
             LEFT JOIN trading_pairs tp ON tp.address = me.pair_address AND tp.chain_id = me.chain_id
+            LEFT JOIN nos_price np ON 1=1  -- 改为LEFT JOIN，避免CROSS JOIN导致的空结果
             WHERE me.pair_address = $1 AND me.chain_id = $2
             
             UNION ALL
@@ -785,13 +807,26 @@ impl TradingOperations {
                 be.transaction_hash,
                 be.sender,
                 be.to_address,
-                be.amount0,
-                be.amount1,
+                -- 对金额进行精度转换
+                (be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC AS amount0,
+                (be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC AS amount1,
                 'burn' as liquidity_type,
                 be.block_number,
-                be.timestamp
+                be.timestamp,
+                -- 计算USD价值（如果包含NOS）- 使用LEFT JOIN避免空结果
+                CASE 
+                    WHEN UPPER(tp.token0_symbol) = 'NOS' AND np.nos_price_usd IS NOT NULL THEN
+                        ((be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) * 
+                        np.nos_price_usd * 2  -- 乘以2因为是总流动性
+                    WHEN UPPER(tp.token1_symbol) = 'NOS' AND np.nos_price_usd IS NOT NULL THEN
+                        ((be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC) * 
+                        np.nos_price_usd * 2  -- 乘以2因为是总流动性
+                    ELSE
+                        NULL
+                END AS value_usd
             FROM burn_events be
             LEFT JOIN trading_pairs tp ON tp.address = be.pair_address AND tp.chain_id = be.chain_id
+            LEFT JOIN nos_price np ON 1=1  -- 改为LEFT JOIN，避免CROSS JOIN导致的空结果
             WHERE be.pair_address = $1 AND be.chain_id = $2
         )
         SELECT * FROM liquidity_events
@@ -816,7 +851,7 @@ impl TradingOperations {
         let rows = sqlx::query(query)
             .bind(pair_address)
             .bind(chain_id)
-            .bind(limit.unwrap_or(i32::MAX))
+            .bind(limit.unwrap_or(50))
             .bind(offset.unwrap_or(0))
             .fetch_all(pool)
             .await?;
@@ -837,7 +872,7 @@ impl TradingOperations {
                 amount0: safe_get_decimal(&row, "amount0"),
                 amount1: safe_get_decimal(&row, "amount1"),
                 liquidity_type: safe_get_string(&row, "liquidity_type"),
-                value_usd: None,
+                value_usd: safe_get_optional_decimal(&row, "value_usd"),
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
             });
