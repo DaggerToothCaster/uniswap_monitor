@@ -100,7 +100,7 @@ impl SwapEventListener {
     async fn poll_pair_events(&mut self) -> Result<()> {
         if let Some((from_block, to_block)) = self.base.get_current_block_range().await? {
             // Load existing pairs
-            let pairs = TradingOperations::get_all_pairs(
+            let pairs= TradingOperations::get_db_pairs(
                 self.base.database.pool(),
                 Some(self.base.chain_id as i32),
                 None,

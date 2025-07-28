@@ -24,6 +24,30 @@ pub struct TradingPair {
     pub transaction_hash: String,
 }
 
+/// 带统计信息的交易对数据结构
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct TradingPairWithStats {
+    pub id: Uuid,
+    pub pair_address: String,
+    pub chain_id: i32,
+    pub token0: String,
+    pub token1: String,
+    pub token0_symbol: Option<String>,
+    pub token1_symbol: Option<String>,
+    pub token0_decimals: Option<i32>,
+    pub token1_decimals: Option<i32>,
+    pub created_at: DateTime<Utc>,
+    pub price: Decimal,              // token0/token1 价格
+    pub inverted_price: Decimal,     // token1/token0 价格
+    pub price_24h_change: Decimal,   // 24小时价格变化百分比
+    pub volume_24h_token0: Decimal,  // 24小时token0交易量
+    pub volume_24h_token1: Decimal,  // 24小时token1交易量
+    pub tx_count_24h: i64,           // 24小时交易次数
+    pub liquidity_token0: Decimal,   // token0流动性
+    pub liquidity_token1: Decimal,   // token1流动性
+    pub last_updated: Option<DateTime<Utc>>, // 最后更新时间
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct LastProcessedBlock {
     pub id: Uuid,

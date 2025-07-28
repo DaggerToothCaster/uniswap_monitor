@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
 };
 use serde::Deserialize;
+use serde_json::json;
 
 #[derive(Debug, Deserialize)]
 pub struct KlineQuery {
@@ -39,7 +40,47 @@ pub struct LiquidityQuery {
 // 复用之前定义的 ApiResponse 结构体
 use super::ApiResponse;
 
-/// 交易对-列表
+/// 获取交易对列表API接口
+///
+/// # 参数
+/// * `params` - 查询参数，包含以下字段：
+///   - `chain_id`: 可选，链ID筛选条件
+///   - `limit`: 可选，每页记录数
+///   - `offset`: 可选，分页偏移量
+/// * `state` - 应用状态，包含数据库连接池
+///
+/// # 返回值
+/// 返回标准API响应格式：
+/// - 成功时返回HTTP 200，包含以下数据结构：
+///   ```json
+///   {
+///     "code": 200,
+///     "message": "success",
+///     "data": {
+///       "data": [...],  // 交易对列表
+///       "pagination": {
+///         "total": 100, // 总记录数
+///         "limit": 10,  // 每页记录数
+///         "offset": 0   // 当前偏移量
+///       }
+///     }
+///   }
+///   ```
+/// - 失败时返回message，包含错误信息
+///
+/// # 错误信息
+/// - message: 数据库查询失败
+///
+/// # 示例请求
+/// ```
+/// GET /api/pairs?chain_id=1&limit=10&offset=0
+/// ```
+///
+/// # 注意事项
+/// 1. 当chain_id为0或未提供时，返回所有链的交易对
+/// 2. 当limit未提供时，默认返回所有记录
+/// 3. 当offset未提供时，默认从第一条记录开始
+/// 获取交易对列表API接口（带统计信息）
 pub async fn get_pairs(
     Query(params): Query<PairsQuery>,
     State(state): State<ApiState>,
@@ -52,11 +93,24 @@ pub async fn get_pairs(
     )
     .await
     {
-        Ok(pairs) => Ok(ApiResponse::success(pairs)),
+        Ok((pairs, total)) => {
+            let response = json!({
+                "data": pairs,
+                "pagination": {
+                    "total": total,
+                    "limit": params.limit.unwrap_or_default(),
+                    "offset": params.offset.unwrap_or_default()
+                }
+            });
+            Ok(ApiResponse::success(response))
+        }
         Err(e) => {
             let error_msg = format!("Failed to get pairs: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -74,7 +128,10 @@ pub async fn get_pair_detail(
         Err(e) => {
             let error_msg = format!("Database error: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -107,7 +164,10 @@ pub async fn get_kline(
         Err(e) => {
             let error_msg = format!("Failed to get kline data: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -133,7 +193,10 @@ pub async fn get_timeseries(
         Err(e) => {
             let error_msg = format!("Failed to get timeseries data: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -159,7 +222,10 @@ pub async fn get_pair_trades(
         Err(e) => {
             let error_msg = format!("Failed to get pair trades: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -185,7 +251,10 @@ pub async fn get_pair_liquidity(
         Err(e) => {
             let error_msg = format!("Failed to get pair liquidity: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }
@@ -203,7 +272,10 @@ pub async fn get_pair_stats(
         Err(e) => {
             let error_msg = format!("Failed to get pair stats: {}", e);
             tracing::error!("{}", error_msg);
-            Err(ApiResponse::<()>::error(StatusCode::INTERNAL_SERVER_ERROR, error_msg))
+            Err(ApiResponse::<()>::error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_msg,
+            ))
         }
     }
 }

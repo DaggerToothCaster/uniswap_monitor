@@ -1,6 +1,7 @@
 use crate::database::utils::*;
 use crate::types::{
     KLineData, LiquidityRecord, PairDetail, PairStats, TimeSeriesData, TradeRecord, TradingPair,
+    TradingPairWithStats,
 };
 use anyhow::Result;
 use rust_decimal::Decimal;
@@ -39,7 +40,205 @@ impl TradingOperations {
         Ok(())
     }
 
+    /// 获取交易对列表（带分页信息）
+    ///
+    /// # 参数
+    /// * `pool` - 数据库连接池
+    /// * `chain_id` - 链ID筛选条件：
+    ///   - `None`: 查询所有链的交易对
+    ///   - `Some(0)`: 查询所有链的交易对（与None等效）
+    ///   - `Some(n)`: 只查询指定链ID的交易对
+    /// * `limit` - 每页记录数：
+    ///   - `None`: 返回所有记录（无分页）
+    ///   - `Some(n)`: 返回最多n条记录
+    /// * `offset` - 分页偏移量：
+    ///   - `None`: 从第一条记录开始
+    ///   - `Some(n)`: 跳过前n条记录
+    ///
+    /// # 返回值
+    /// 返回 `Result<(Vec<TradingPairWithStats>, i64)>` 元组：
+    /// - `Vec<TradingPairWithStats>`: 查询到的交易对列表
+    /// - `i64`: 符合条件的总记录数（不考虑分页）
+    ///
+    /// # 示例
+    /// ```rust
+    /// // 查询以太坊(chain_id=1)的前10条交易对
+    /// let (pairs, total) = get_all_pairs(&pool, Some(1), Some(10), Some(0)).await?;
+    /// // 查询所有交易对（不分页）
+    /// let (all_pairs, total) = get_all_pairs(&pool, None, None, None)).await?;
+    ///
     pub async fn get_all_pairs(
+        pool: &PgPool,
+        chain_id: Option<i32>,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<(Vec<TradingPairWithStats>, i64), sqlx::Error> {
+        let has_chain_filter = chain_id.unwrap_or(0) != 0;
+        let base_query = format!(
+            r#"
+    WITH latest_swap AS (
+        SELECT 
+            se.pair_address,
+            se.chain_id,
+            MAX(se.timestamp) as latest_timestamp
+        FROM swap_events se
+        {}
+        GROUP BY se.pair_address, se.chain_id
+    ),
+    price_data AS (
+        SELECT
+            se.pair_address,
+            se.chain_id,
+            MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
+                NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
+            END)::NUMERIC as current_price,
+            MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN 
+                ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
+                NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
+            END)::NUMERIC as price_24h_ago
+        FROM swap_events se
+        JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+        {}
+        GROUP BY se.pair_address, se.chain_id
+    ),
+    pair_stats AS (
+        SELECT 
+            tp.id,
+            tp.address AS pair_address,
+            tp.chain_id,
+            tp.token0,
+            tp.token1,
+            tp.token0_symbol,
+            tp.token1_symbol,
+            tp.token0_decimals,
+            tp.token1_decimals,
+            tp.created_at,
+            ls.latest_timestamp AS last_updated,
+            COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
+            COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
+            COALESCE(
+                ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100, 
+                0
+            )::NUMERIC(38,18) AS price_24h_change,
+
+            -- 24h volumes
+            (
+                SELECT COALESCE(SUM(
+                    ((se.amount0_in + se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC)
+                )::NUMERIC, 0)
+                FROM swap_events se 
+                WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                AND se.timestamp >= NOW() - INTERVAL '24 hours'
+            ) AS volume_24h_token0,
+            (
+                SELECT COALESCE(SUM(
+                    ((se.amount1_in + se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC)
+                )::NUMERIC, 0)
+                FROM swap_events se 
+                WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                AND se.timestamp >= NOW() - INTERVAL '24 hours'
+            ) AS volume_24h_token1,
+
+            -- 24h tx count
+            (
+                SELECT COUNT(*) FROM swap_events se 
+                WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                AND se.timestamp >= NOW() - INTERVAL '24 hours'
+            ) AS tx_count_24h,
+
+            -- token0 liquidity
+            (
+                SELECT COALESCE(SUM(
+                    (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                )::NUMERIC, 0)
+                FROM mint_events me 
+                WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
+            ) -
+            (
+                SELECT COALESCE(SUM(
+                    (be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                )::NUMERIC, 0)
+                FROM burn_events be 
+                WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
+            ) AS liquidity_token0,
+
+            -- token1 liquidity
+            (
+                SELECT COALESCE(SUM(
+                    (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                )::NUMERIC, 0)
+                FROM mint_events me 
+                WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
+            ) -
+            (
+                SELECT COALESCE(SUM(
+                    (be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                )::NUMERIC, 0)
+                FROM burn_events be 
+                WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
+            ) AS liquidity_token1
+        FROM trading_pairs tp
+        LEFT JOIN latest_swap ls ON tp.address = ls.pair_address AND tp.chain_id = ls.chain_id
+        LEFT JOIN price_data pd ON tp.address = pd.pair_address AND tp.chain_id = pd.chain_id
+        {}
+    )
+    SELECT * FROM pair_stats
+    ORDER BY volume_24h_token0 DESC
+    LIMIT ${} OFFSET ${}
+    "#,
+            if has_chain_filter {
+                "WHERE se.chain_id = $1"
+            } else {
+                ""
+            },
+            if has_chain_filter {
+                "WHERE se.chain_id = $1"
+            } else {
+                ""
+            },
+            if has_chain_filter {
+                "WHERE tp.chain_id = $1"
+            } else {
+                ""
+            },
+            if has_chain_filter { 2 } else { 1 },
+            if has_chain_filter { 3 } else { 2 }
+        );
+
+        let pairs = if has_chain_filter {
+            sqlx::query_as::<_, TradingPairWithStats>(&base_query)
+                .bind(chain_id.unwrap())
+                .bind(limit.unwrap_or(i32::MAX))
+                .bind(offset.unwrap_or(0))
+                .fetch_all(pool)
+                .await?
+        } else {
+            sqlx::query_as::<_, TradingPairWithStats>(&base_query)
+                .bind(limit.unwrap_or(i32::MAX))
+                .bind(offset.unwrap_or(0))
+                .fetch_all(pool)
+                .await?
+        };
+
+        let count_query = if has_chain_filter {
+            "SELECT COUNT(*) FROM trading_pairs WHERE chain_id = $1"
+        } else {
+            "SELECT COUNT(*) FROM trading_pairs"
+        };
+        let total = if has_chain_filter {
+            sqlx::query_scalar(count_query)
+                .bind(chain_id.unwrap())
+                .fetch_one(pool)
+                .await?
+        } else {
+            sqlx::query_scalar(count_query).fetch_one(pool).await?
+        };
+
+        Ok((pairs, total))
+    }
+   
+    pub async fn get_db_pairs(
         pool: &PgPool,
         chain_id: Option<i32>,
         limit: Option<i32>,
