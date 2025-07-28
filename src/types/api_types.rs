@@ -37,15 +37,18 @@ pub struct TradingPairWithStats {
     pub token0_decimals: Option<i32>,
     pub token1_decimals: Option<i32>,
     pub created_at: DateTime<Utc>,
-    pub price: Decimal,              // token0/token1 价格
-    pub inverted_price: Decimal,     // token1/token0 价格
-    pub price_24h_change: Decimal,   // 24小时价格变化百分比
-    pub volume_24h_token0: Decimal,  // 24小时token0交易量
-    pub volume_24h_token1: Decimal,  // 24小时token1交易量
-    pub tx_count_24h: i64,           // 24小时交易次数
-    pub liquidity_token0: Decimal,   // token0流动性
-    pub liquidity_token1: Decimal,   // token1流动性
+    pub price: Decimal,                      // token0/token1 价格
+    pub inverted_price: Decimal,             // token1/token0 价格
+    pub price_24h_change: Decimal,           // 24小时价格变化百分比
+    pub volume_24h_token0: Decimal,          // 24小时token0交易量
+    pub volume_24h_token1: Decimal,          // 24小时token1交易量
+    pub tx_count_24h: i64,                   // 24小时交易次数
+    pub liquidity_token0: Decimal,           // token0流动性
+    pub liquidity_token1: Decimal,           // token1流动性
     pub last_updated: Option<DateTime<Utc>>, // 最后更新时间
+    pub price_usd: Decimal,                  // token0/token1 价格的usd价值
+    pub volume_24h_usd: Decimal,             // 24小时 usd交易价值
+    pub liquidity_usd: Decimal,              // 流动性 usd价值
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -129,6 +132,7 @@ pub struct TradeRecord {
     pub price: Decimal,
     pub trade_type: String,
     pub volume_usd: Option<Decimal>,
+    pub price_usd: Option<Decimal>,
     pub block_number: i64,
     pub timestamp: DateTime<Utc>,
 }

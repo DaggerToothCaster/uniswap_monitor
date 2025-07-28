@@ -170,119 +170,117 @@ impl TradingOperations {
         offset: Option<i32>,
     ) -> Result<(Vec<TradingPairWithStats>, i64), sqlx::Error> {
         let has_chain_filter = chain_id.unwrap_or(0) != 0;
+
+        // 保持原有的SQL查询不变
         let base_query = format!(
             r#"
-            WITH latest_swap AS (
-                SELECT 
-                    se.pair_address,
-                    se.chain_id,
-                    MAX(se.timestamp) as latest_timestamp
-                FROM swap_events se
-                {}
-                GROUP BY se.pair_address, se.chain_id
-            ),
-            price_data AS (
-                SELECT
-                    se.pair_address,
-                    se.chain_id,
-                    MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
-                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
-                    END)::NUMERIC as current_price,
-                    MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                        ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
-                        NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
-                    END)::NUMERIC as price_24h_ago
-                FROM swap_events se
-                JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
-                {}
-                GROUP BY se.pair_address, se.chain_id
-            ),
-            pair_stats AS (
-                SELECT 
-                    tp.id,
-                    tp.address AS pair_address,
-                    tp.chain_id,
-                    tp.token0,
-                    tp.token1,
-                    tp.token0_symbol,
-                    tp.token1_symbol,
-                    tp.token0_decimals,
-                    tp.token1_decimals,
-                    tp.created_at,
-                    ls.latest_timestamp AS last_updated,
-                    COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
-                    COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
-                    COALESCE(
-                        ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100, 
-                        0
-                    )::NUMERIC(38,18) AS price_24h_change,
-
-                    -- 24h volumes
-                    (
-                        SELECT COALESCE(SUM(
-                            ((se.amount0_in + se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC)
-                        )::NUMERIC, 0)
-                        FROM swap_events se 
-                        WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
-                        AND se.timestamp >= NOW() - INTERVAL '24 hours'
-                    ) AS volume_24h_token0,
-                    (
-                        SELECT COALESCE(SUM(
-                            ((se.amount1_in + se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC)
-                        )::NUMERIC, 0)
-                        FROM swap_events se 
-                        WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
-                        AND se.timestamp >= NOW() - INTERVAL '24 hours'
-                    ) AS volume_24h_token1,
-
-                    -- 24h tx count
-                    (
-                        SELECT COUNT(*) FROM swap_events se 
-                        WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
-                        AND se.timestamp >= NOW() - INTERVAL '24 hours'
-                    ) AS tx_count_24h,
-
-                    -- token0 liquidity
-                    (
-                        SELECT COALESCE(SUM(
-                            (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
-                        )::NUMERIC, 0)
-                        FROM mint_events me 
-                        WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
-                    ) -
-                    (
-                        SELECT COALESCE(SUM(
-                            (be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
-                        )::NUMERIC, 0)
-                        FROM burn_events be 
-                        WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
-                    ) AS liquidity_token0,
-
-                    -- token1 liquidity
-                    (
-                        SELECT COALESCE(SUM(
-                            (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
-                        )::NUMERIC, 0)
-                        FROM mint_events me 
-                        WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
-                    ) -
-                    (
-                        SELECT COALESCE(SUM(
-                            (be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
-                        )::NUMERIC, 0)
-                        FROM burn_events be 
-                        WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
-                    ) AS liquidity_token1
-                FROM trading_pairs tp
-                LEFT JOIN latest_swap ls ON tp.address = ls.pair_address AND tp.chain_id = ls.chain_id
-                LEFT JOIN price_data pd ON tp.address = pd.pair_address AND tp.chain_id = pd.chain_id
-                {}
-            )
-            SELECT * FROM pair_stats
-            ORDER BY volume_24h_token0 DESC
-            LIMIT ${} OFFSET ${}
-            "#,
+        WITH latest_swap AS (
+            SELECT 
+                se.pair_address,
+                se.chain_id,
+                MAX(se.timestamp) as latest_timestamp
+            FROM swap_events se
+            {}
+            GROUP BY se.pair_address, se.chain_id
+        ),
+        price_data AS (
+            SELECT
+                se.pair_address,
+                se.chain_id,
+                MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                END)::NUMERIC as current_price,
+                MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
+                END)::NUMERIC as price_24h_ago
+            FROM swap_events se
+            JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
+            {}
+            GROUP BY se.pair_address, se.chain_id
+        ),
+        pair_stats AS (
+            SELECT 
+                tp.id,
+                tp.address AS pair_address,
+                tp.chain_id,
+                tp.token0,
+                tp.token1,
+                tp.token0_symbol,
+                tp.token1_symbol,
+                tp.token0_decimals,
+                tp.token1_decimals,
+                tp.created_at,
+                ls.latest_timestamp AS last_updated,
+                COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
+                COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
+                COALESCE(
+                    ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100,
+                    0
+                )::NUMERIC(38,18) AS price_24h_change,
+                -- 24h volumes
+                (
+                    SELECT COALESCE(SUM(
+                        ((se.amount0_in + se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC)
+                    )::NUMERIC, 0)
+                    FROM swap_events se 
+                    WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                    AND se.timestamp >= NOW() - INTERVAL '24 hours'
+                ) AS volume_24h_token0,
+                (
+                    SELECT COALESCE(SUM(
+                        ((se.amount1_in + se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC)
+                    )::NUMERIC, 0)
+                    FROM swap_events se 
+                    WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                    AND se.timestamp >= NOW() - INTERVAL '24 hours'
+                ) AS volume_24h_token1,
+                -- 24h tx count
+                (
+                    SELECT COUNT(*) FROM swap_events se 
+                    WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
+                    AND se.timestamp >= NOW() - INTERVAL '24 hours'
+                ) AS tx_count_24h,
+                -- token0 liquidity
+                (
+                    SELECT COALESCE(SUM(
+                        (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                    )::NUMERIC, 0)
+                    FROM mint_events me 
+                    WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
+                ) -
+                (
+                    SELECT COALESCE(SUM(
+                        (be.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
+                    )::NUMERIC, 0)
+                    FROM burn_events be 
+                    WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
+                ) AS liquidity_token0,
+                -- token1 liquidity
+                (
+                    SELECT COALESCE(SUM(
+                        (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                    )::NUMERIC, 0)
+                    FROM mint_events me 
+                    WHERE me.pair_address = tp.address AND me.chain_id = tp.chain_id
+                ) -
+                (
+                    SELECT COALESCE(SUM(
+                        (be.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
+                    )::NUMERIC, 0)
+                    FROM burn_events be 
+                    WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
+                ) AS liquidity_token1
+            FROM trading_pairs tp
+            LEFT JOIN latest_swap ls ON tp.address = ls.pair_address AND tp.chain_id = ls.chain_id
+            LEFT JOIN price_data pd ON tp.address = pd.pair_address AND tp.chain_id = pd.chain_id
+            {}
+        )
+        SELECT * FROM pair_stats
+        ORDER BY volume_24h_token0 DESC
+        LIMIT ${} OFFSET ${}
+        "#,
             if has_chain_filter {
                 "WHERE se.chain_id = $1"
             } else {
@@ -302,26 +300,78 @@ impl TradingOperations {
             if has_chain_filter { 3 } else { 2 }
         );
 
-        let pairs = if has_chain_filter {
-            sqlx::query_as::<_, TradingPairWithStats>(&base_query)
+        // 执行原有查询
+        let rows = if has_chain_filter {
+            sqlx::query(&base_query)
                 .bind(chain_id.unwrap())
-                .bind(limit.unwrap_or(i32::MAX))
+                .bind(limit.unwrap_or(50))
                 .bind(offset.unwrap_or(0))
                 .fetch_all(pool)
                 .await?
         } else {
-            sqlx::query_as::<_, TradingPairWithStats>(&base_query)
-                .bind(limit.unwrap_or(i32::MAX))
+            sqlx::query(&base_query)
+                .bind(limit.unwrap_or(50))
                 .bind(offset.unwrap_or(0))
                 .fetch_all(pool)
                 .await?
         };
 
+        // 获取NOS价格用于后续计算
+        let nos_price = Self::get_latest_nos_price(pool)
+            .await
+            .unwrap_or(Decimal::ZERO);
+
+        // 处理查询结果并计算USD字段
+        let mut pairs = Vec::new();
+        for row in rows {
+            let mut pair = TradingPairWithStats {
+                id: safe_get_uuid(&row, "id"),
+                pair_address: safe_get_string(&row, "pair_address"),
+                chain_id: safe_get_i32(&row, "chain_id"),
+                token0: safe_get_string(&row, "token0"),
+                token1: safe_get_string(&row, "token1"),
+                token0_symbol: safe_get_optional_string(&row, "token0_symbol"),
+                token1_symbol: safe_get_optional_string(&row, "token1_symbol"),
+                token0_decimals: safe_get_optional_i32(&row, "token0_decimals"),
+                token1_decimals: safe_get_optional_i32(&row, "token1_decimals"),
+                created_at: safe_get_datetime(&row, "created_at"),
+                last_updated: safe_get_optional_datetime(&row, "last_updated"),
+                price: safe_get_decimal(&row, "price"),
+                inverted_price: safe_get_decimal(&row, "inverted_price"),
+                price_24h_change: safe_get_decimal(&row, "price_24h_change"),
+                volume_24h_token0: safe_get_decimal(&row, "volume_24h_token0"),
+                volume_24h_token1: safe_get_decimal(&row, "volume_24h_token1"),
+                tx_count_24h: safe_get_i64(&row, "tx_count_24h"),
+                liquidity_token0: safe_get_decimal(&row, "liquidity_token0"),
+                liquidity_token1: safe_get_decimal(&row, "liquidity_token1"),
+                // 初始化USD字段为0，后续计算
+                price_usd: Decimal::ZERO,
+                volume_24h_usd: Decimal::ZERO,
+                liquidity_usd: Decimal::ZERO,
+            };
+
+            // 后处理：计算USD相关字段
+            Self::calculate_usd_fields(&mut pair, nos_price);
+
+            pairs.push(pair);
+        }
+
+        // 按USD成交量重新排序（如果有USD数据的话）
+        pairs.sort_by(|a, b| {
+            if a.volume_24h_usd > Decimal::ZERO || b.volume_24h_usd > Decimal::ZERO {
+                b.volume_24h_usd.cmp(&a.volume_24h_usd)
+            } else {
+                b.volume_24h_token0.cmp(&a.volume_24h_token0)
+            }
+        });
+
+        // 获取总数
         let count_query = if has_chain_filter {
             "SELECT COUNT(*) FROM trading_pairs WHERE chain_id = $1"
         } else {
             "SELECT COUNT(*) FROM trading_pairs"
         };
+
         let total = if has_chain_filter {
             sqlx::query_scalar(count_query)
                 .bind(chain_id.unwrap())
@@ -370,6 +420,7 @@ impl TradingOperations {
         pair_address: &str,
         chain_id: i32,
     ) -> Result<Option<TradingPairWithStats>, sqlx::Error> {
+        // 保持原有SQL查询不变
         let query = r#"
         WITH latest_swap AS (
             SELECT 
@@ -384,13 +435,13 @@ impl TradingOperations {
             SELECT
                 se.pair_address,
                 se.chain_id,
-                MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
-                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
+                MAX(CASE WHEN se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
                 END)::NUMERIC as current_price,
-                MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN 
-                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) / 
-                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0) 
+                MAX(CASE WHEN se.timestamp <= NOW() - INTERVAL '24 hours' AND se.amount0_in > 0 AND se.amount1_out > 0 THEN
+                    ((se.amount0_in)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC) /
+                    NULLIF(((se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC), 0)
                 END)::NUMERIC as price_24h_ago
             FROM swap_events se
             JOIN trading_pairs tp ON se.pair_address = tp.address AND se.chain_id = tp.chain_id
@@ -413,10 +464,9 @@ impl TradingOperations {
                 COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
                 COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
                 COALESCE(
-                    ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100, 
+                    ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100,
                     0
                 )::NUMERIC(38,18) AS price_24h_change,
-
                 -- 24h volumes
                 (
                     SELECT COALESCE(SUM(
@@ -426,7 +476,6 @@ impl TradingOperations {
                     WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
                     AND se.timestamp >= NOW() - INTERVAL '24 hours'
                 ) AS volume_24h_token0,
-
                 (
                     SELECT COALESCE(SUM(
                         ((se.amount1_in + se.amount1_out)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC)
@@ -435,14 +484,12 @@ impl TradingOperations {
                     WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
                     AND se.timestamp >= NOW() - INTERVAL '24 hours'
                 ) AS volume_24h_token1,
-
                 -- 24h tx count
                 (
                     SELECT COUNT(*) FROM swap_events se 
                     WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
                     AND se.timestamp >= NOW() - INTERVAL '24 hours'
                 ) AS tx_count_24h,
-
                 -- token0 liquidity
                 (
                     SELECT COALESCE(SUM(
@@ -458,7 +505,6 @@ impl TradingOperations {
                     FROM burn_events be 
                     WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
                 ) AS liquidity_token0,
-
                 -- token1 liquidity
                 (
                     SELECT COALESCE(SUM(
@@ -474,7 +520,6 @@ impl TradingOperations {
                     FROM burn_events be 
                     WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
                 ) AS liquidity_token1
-
             FROM trading_pairs tp
             LEFT JOIN latest_swap ls ON tp.address = ls.pair_address AND tp.chain_id = ls.chain_id
             LEFT JOIN price_data pd ON tp.address = pd.pair_address AND tp.chain_id = pd.chain_id
@@ -484,13 +529,53 @@ impl TradingOperations {
         LIMIT 1
     "#;
 
-        let result = sqlx::query_as::<_, TradingPairWithStats>(query)
+        // 执行原有查询
+        let row = sqlx::query(query)
             .bind(pair_address)
             .bind(chain_id)
             .fetch_optional(pool)
             .await?;
 
-        Ok(result)
+        if let Some(row) = row {
+            // 获取NOS价格用于USD计算
+            let nos_price = Self::get_latest_nos_price(pool)
+                .await
+                .unwrap_or(Decimal::ZERO);
+
+            // 构建TradingPairWithStats对象
+            let mut pair = TradingPairWithStats {
+                id: safe_get_uuid(&row, "id"),
+                pair_address: safe_get_string(&row, "pair_address"),
+                chain_id: safe_get_i32(&row, "chain_id"),
+                token0: safe_get_string(&row, "token0"),
+                token1: safe_get_string(&row, "token1"),
+                token0_symbol: safe_get_optional_string(&row, "token0_symbol"),
+                token1_symbol: safe_get_optional_string(&row, "token1_symbol"),
+                token0_decimals: safe_get_optional_i32(&row, "token0_decimals"),
+                token1_decimals: safe_get_optional_i32(&row, "token1_decimals"),
+                created_at: safe_get_datetime(&row, "created_at"),
+                last_updated: safe_get_optional_datetime(&row, "last_updated"),
+                price: safe_get_decimal(&row, "price"),
+                inverted_price: safe_get_decimal(&row, "inverted_price"),
+                price_24h_change: safe_get_decimal(&row, "price_24h_change"),
+                volume_24h_token0: safe_get_decimal(&row, "volume_24h_token0"),
+                volume_24h_token1: safe_get_decimal(&row, "volume_24h_token1"),
+                tx_count_24h: safe_get_i64(&row, "tx_count_24h"),
+                liquidity_token0: safe_get_decimal(&row, "liquidity_token0"),
+                liquidity_token1: safe_get_decimal(&row, "liquidity_token1"),
+                // 初始化USD字段为0，后续计算
+                price_usd: Decimal::ZERO,
+                volume_24h_usd: Decimal::ZERO,
+                liquidity_usd: Decimal::ZERO,
+            };
+
+            // 后处理：计算USD相关字段
+            Self::calculate_usd_fields(&mut pair, nos_price);
+
+            Ok(Some(pair))
+        } else {
+            Ok(None)
+        }
     }
 
     /// 获取指定交易对的交易记录（带分页信息）
@@ -625,6 +710,7 @@ impl TradingOperations {
                 price: safe_get_decimal(&row, "price"),
                 trade_type: safe_get_string(&row, "trade_type"),
                 volume_usd: None,
+                price_usd: None,
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
             });
@@ -1127,49 +1213,54 @@ impl TradingOperations {
         Ok((timeseries, total))
     }
 
-    // 辅助函数：批量处理K线数据（如果需要在Rust中进行后处理）
-    pub fn process_kline_continuity(mut klines: Vec<KLineData>) -> Vec<KLineData> {
-        if klines.is_empty() {
-            return klines;
-        }
+    // 辅助函数：获取最新NOS价格
+    async fn get_latest_nos_price(pool: &PgPool) -> Result<Decimal, sqlx::Error> {
+        let query = r#"
+        SELECT price_usd
+        FROM token_prices
+        WHERE UPPER(token_symbol) = 'NOS'
+        ORDER BY timestamp DESC
+        LIMIT 1
+    "#;
 
-        // 按时间排序（升序）
-        klines.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        let price: Option<Decimal> = sqlx::query_scalar(query).fetch_optional(pool).await?;
 
-        // 处理开盘价连续性
-        for i in 1..klines.len() {
-            if klines[i].open == Decimal::ZERO {
-                klines[i].open = klines[i - 1].close;
-            }
-        }
-
-        // 重新按时间降序排列
-        klines.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-
-        klines
+        Ok(price.unwrap_or(Decimal::ZERO))
     }
 
-    // 可选：添加价格验证函数
-    pub fn validate_price_data(klines: &mut Vec<KLineData>) {
-        for kline in klines.iter_mut() {
-            // 确保OHLC数据的逻辑正确性
-            if kline.high < kline.low {
-                std::mem::swap(&mut kline.high, &mut kline.low);
-            }
-
-            // 确保开盘价和收盘价在高低价范围内
-            if kline.open > kline.high {
-                kline.high = kline.open;
-            }
-            if kline.open < kline.low {
-                kline.low = kline.open;
-            }
-            if kline.close > kline.high {
-                kline.high = kline.close;
-            }
-            if kline.close < kline.low {
-                kline.low = kline.close;
-            }
+    // 辅助函数：计算USD相关字段
+    fn calculate_usd_fields(pair: &mut TradingPairWithStats, nos_price: Decimal) {
+        if nos_price <= Decimal::ZERO {
+            return; // 如果没有NOS价格，保持USD字段为0
         }
+
+        let token0_is_nos = pair
+            .token0_symbol
+            .as_ref()
+            .map(|s| s.to_uppercase() == "NOS")
+            .unwrap_or(false);
+
+        let token1_is_nos = pair
+            .token1_symbol
+            .as_ref()
+            .map(|s| s.to_uppercase() == "NOS")
+            .unwrap_or(false);
+
+        if token0_is_nos {
+            // Token0 是 NOS
+            pair.price_usd = nos_price;
+            pair.volume_24h_usd = pair.volume_24h_token0 * nos_price;
+            pair.liquidity_usd = pair.liquidity_token0 * nos_price * Decimal::from(2);
+        // 乘以2因为是总流动性的一半
+        } else if token1_is_nos {
+            // Token1 是 NOS
+            if pair.price > Decimal::ZERO {
+                pair.price_usd = nos_price / pair.price; // NOS价格除以当前价格
+            }
+            pair.volume_24h_usd = pair.volume_24h_token1 * nos_price;
+            pair.liquidity_usd = pair.liquidity_token1 * nos_price * Decimal::from(2);
+            // 乘以2因为是总流动性的一半
+        }
+        // 如果都不是NOS，USD字段保持为0
     }
 }
