@@ -247,29 +247,6 @@ pub struct PairStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PairDetail {
-    pub pair_address: String,
-    pub chain_id: i32,
-    pub token0: String,
-    pub token1: String,
-    pub token0_symbol: Option<String>,
-    pub token1_symbol: Option<String>,
-    pub token0_name: Option<String>,
-    pub token1_name: Option<String>,
-    pub token0_decimals: Option<i32>,
-    pub token1_decimals: Option<i32>,
-    pub current_price: Decimal,
-    pub volume_24h: Decimal,
-    pub volume_7d: Decimal,
-    pub liquidity: Decimal,
-    pub price_change_24h: Decimal,
-    pub price_change_7d: Decimal,
-    pub tx_count_24h: i64,
-    pub tx_count_7d: i64,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainStats {
     pub chain_id: i32,
     pub chain_name: String,

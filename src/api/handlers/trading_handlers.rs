@@ -206,19 +206,26 @@ pub async fn get_pair_trades(
     Query(params): Query<TradeQuery>,
     State(state): State<ApiState>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
-
     match TradingOperations::get_pair_trades(
         state.database.pool(),
         &address,
         chain_id,
-        limit,
-        offset,
+        params.limit,
+        params.offset,
     )
     .await
     {
-        Ok(trades) => Ok(ApiResponse::success(trades)),
+        Ok((trades, total)) => {
+            let response = json!({
+                "data": trades,
+                "pagination": {
+                    "total": total,
+                    "limit": params.limit.unwrap_or_default(),
+                    "offset": params.offset.unwrap_or_default()
+                }
+            });
+            Ok(ApiResponse::success(response))
+        }
         Err(e) => {
             let error_msg = format!("Failed to get pair trades: {}", e);
             tracing::error!("{}", error_msg);
@@ -235,8 +242,8 @@ pub async fn get_pair_liquidity(
     Query(params): Query<LiquidityQuery>,
     State(state): State<ApiState>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit;
+    let offset = params.offset;
 
     match TradingOperations::get_pair_liquidity_events(
         state.database.pool(),
@@ -247,7 +254,17 @@ pub async fn get_pair_liquidity(
     )
     .await
     {
-        Ok(liquidity) => Ok(ApiResponse::success(liquidity)),
+        Ok((liquidity, total)) => {
+            let response = json!({
+                "data": liquidity,
+                "pagination": {
+                    "total": total,
+                    "limit": params.limit.unwrap_or_default(),
+                    "offset": params.offset.unwrap_or_default()
+                }
+            });
+            Ok(ApiResponse::success(response))
+        }
         Err(e) => {
             let error_msg = format!("Failed to get pair liquidity: {}", e);
             tracing::error!("{}", error_msg);
