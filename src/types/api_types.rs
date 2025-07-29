@@ -172,9 +172,11 @@ pub struct WalletTransaction {
     pub token0_decimals: Option<i32>,
     pub token1_decimals: Option<i32>,
     pub price: Option<Decimal>,
-    pub value_usd: Option<Decimal>,
+    pub volume_usd: Option<Decimal>,
+    pub price_usd: Option<Decimal>,
     pub block_number: i64,
     pub timestamp: DateTime<Utc>,
+     pub value_usd: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

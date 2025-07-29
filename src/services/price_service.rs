@@ -48,6 +48,13 @@ impl PriceService {
                 api_url: "https://api.bidacoin.co/api/v0/markets/publicapi/ticker?market=NOSUSDT".to_string(),
                 update_interval: Duration::from_secs(60*10), // 每分钟更新一次
             },
+            TokenPriceConfig {
+                symbol: "WKTO".to_string(),
+                address: "0x3850D46C0442A86AaDd41D99f635e316c8788269".to_string(), // 需要实际的NOS合约地址
+                chain_id: 2559, // 以太坊主网
+                api_url: "https://api.bidacoin.co/api/v0/markets/publicapi/ticker?market=KTOUSDT".to_string(),
+                update_interval: Duration::from_secs(60*10), // 每分钟更新一次
+            },
         ];
 
         Self {

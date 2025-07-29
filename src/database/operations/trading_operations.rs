@@ -316,11 +316,6 @@ impl TradingOperations {
                 .await?
         };
 
-        // 获取NOS价格用于后续计算
-        let nos_price = Self::get_latest_nos_price(pool)
-            .await
-            .unwrap_or(Decimal::ZERO);
-
         // 处理查询结果并计算USD字段
         let mut pairs = Vec::new();
         for row in rows {
@@ -350,11 +345,10 @@ impl TradingOperations {
                 liquidity_usd: Decimal::ZERO,
             };
 
-            // 后处理：计算USD相关字段
-            Self::calculate_usd_fields(&mut pair, nos_price);
-
             pairs.push(pair);
         }
+        // 后处理：计算USD相关字段
+        super::TradeUsdCalculator::calculate_pair_usd_fields(pool, &mut pairs);
 
         // 按USD成交量重新排序（如果有USD数据的话）
         pairs.sort_by(|a, b| {
@@ -537,11 +531,6 @@ impl TradingOperations {
             .await?;
 
         if let Some(row) = row {
-            // 获取NOS价格用于USD计算
-            let nos_price = Self::get_latest_nos_price(pool)
-                .await
-                .unwrap_or(Decimal::ZERO);
-
             // 构建TradingPairWithStats对象
             let mut pair = TradingPairWithStats {
                 id: safe_get_uuid(&row, "id"),
@@ -570,7 +559,10 @@ impl TradingOperations {
             };
 
             // 后处理：计算USD相关字段
-            Self::calculate_usd_fields(&mut pair, nos_price);
+            super::TradeUsdCalculator::calculate_pair_usd_fields(
+                pool,
+                std::slice::from_mut(&mut pair),
+            );
 
             Ok(Some(pair))
         } else {
@@ -691,7 +683,7 @@ impl TradingOperations {
 
         let mut trades = Vec::new();
         for row in rows {
-            trades.push(TradeRecord {
+            let mut trade = TradeRecord {
                 id: safe_get_uuid(&row, "id"),
                 chain_id: safe_get_i32(&row, "chain_id"),
                 pair_address: safe_get_string(&row, "pair_address"),
@@ -709,16 +701,18 @@ impl TradingOperations {
                 amount1_out: safe_get_decimal(&row, "amount1_out"),
                 price: safe_get_decimal(&row, "price"),
                 trade_type: safe_get_string(&row, "trade_type"),
-                volume_usd: None,
-                price_usd: None,
+                volume_usd: Some(Decimal::ZERO), // 默认为0，后面计算
+                price_usd: Some(Decimal::ZERO),  // 默认为0，后面计算
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
-            });
-        }
+            };
 
+            trades.push(trade);
+        }
+        // 计算USD字段
+        super::TradeUsdCalculator::calculate_trade_usd_fields(pool, &mut trades);
         Ok((trades, total))
     }
-
     // 获取交易对统计信息
     pub async fn get_pair_stats(
         pool: &PgPool,
@@ -1213,54 +1207,5 @@ impl TradingOperations {
         Ok((timeseries, total))
     }
 
-    // 辅助函数：获取最新NOS价格
-    async fn get_latest_nos_price(pool: &PgPool) -> Result<Decimal, sqlx::Error> {
-        let query = r#"
-        SELECT price_usd
-        FROM token_prices
-        WHERE UPPER(token_symbol) = 'NOS'
-        ORDER BY timestamp DESC
-        LIMIT 1
-    "#;
-
-        let price: Option<Decimal> = sqlx::query_scalar(query).fetch_optional(pool).await?;
-
-        Ok(price.unwrap_or(Decimal::ZERO))
-    }
-
     // 辅助函数：计算USD相关字段
-    fn calculate_usd_fields(pair: &mut TradingPairWithStats, nos_price: Decimal) {
-        if nos_price <= Decimal::ZERO {
-            return; // 如果没有NOS价格，保持USD字段为0
-        }
-
-        let token0_is_nos = pair
-            .token0_symbol
-            .as_ref()
-            .map(|s| s.to_uppercase() == "NOS")
-            .unwrap_or(false);
-
-        let token1_is_nos = pair
-            .token1_symbol
-            .as_ref()
-            .map(|s| s.to_uppercase() == "NOS")
-            .unwrap_or(false);
-
-        if token0_is_nos {
-            // Token0 是 NOS
-            pair.price_usd = nos_price;
-            pair.volume_24h_usd = pair.volume_24h_token0 * nos_price;
-            pair.liquidity_usd = pair.liquidity_token0 * nos_price * Decimal::from(2);
-        // 乘以2因为是总流动性的一半
-        } else if token1_is_nos {
-            // Token1 是 NOS
-            if pair.price > Decimal::ZERO {
-                pair.price_usd = nos_price / pair.price; // NOS价格除以当前价格
-            }
-            pair.volume_24h_usd = pair.volume_24h_token1 * nos_price;
-            pair.liquidity_usd = pair.liquidity_token1 * nos_price * Decimal::from(2);
-            // 乘以2因为是总流动性的一半
-        }
-        // 如果都不是NOS，USD字段保持为0
-    }
 }

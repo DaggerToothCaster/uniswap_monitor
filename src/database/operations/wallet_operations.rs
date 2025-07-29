@@ -161,7 +161,7 @@ impl WalletOperations {
             let amount0_out = safe_get_decimal(&row, "amount0_out");
             let amount1_out = safe_get_decimal(&row, "amount1_out");
 
-            transactions.push(WalletTransaction {
+            let mut trade = WalletTransaction {
                 id: safe_get_uuid(&row, "id"),
                 chain_id: safe_get_i32(&row, "chain_id"),
                 pair_address: safe_get_string(&row, "pair_address"),
@@ -176,11 +176,17 @@ impl WalletOperations {
                 token0_decimals: Some(token0_decimals),
                 token1_decimals: Some(token1_decimals),
                 price: Some(price),
-                value_usd: None,
+                volume_usd: Some(Decimal::ZERO), // 默认为0，后面计算
+                price_usd: Some(Decimal::ZERO),  // 默认为0，后面计算
                 block_number: safe_get_i64(&row, "block_number"),
                 timestamp: safe_get_datetime(&row, "timestamp"),
-            });
+                value_usd: Some(Decimal::ZERO), // 默认为0，后面计算
+            };
+
+            transactions.push(trade);
         }
+        // 计算USD字段
+        super::TradeUsdCalculator::calculate_wallet_usd_fields(pool, &mut transactions);
 
         Ok((transactions, total))
     }
