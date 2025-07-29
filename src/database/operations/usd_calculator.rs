@@ -1,64 +1,48 @@
-use crate::types::{
-    TradingPairWithStats, TradeRecord, WalletTransaction,
-};
+use crate::types::{TradeRecord, TradingPairWithStats, WalletTransaction};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
-use std::collections::HashMap;
 use sqlx::Row;
+use std::collections::HashMap;
 
 /// 统一的USD计算辅助结构
 pub struct TradeUsdCalculator;
 
 impl TradeUsdCalculator {
-    /// 获取所有锚定币的最新价格
-    pub async fn get_anchor_prices(pool: &PgPool) -> Result<HashMap<String, Decimal>, sqlx::Error> {
+    /// 获取所有代币的最新USD价格
+    pub async fn get_token_prices(pool: &PgPool) -> Result<HashMap<String, Decimal>, sqlx::Error> {
         let query = r#"
             SELECT DISTINCT ON (UPPER(token_symbol)) 
                 UPPER(token_symbol) as symbol,
                 price_usd
             FROM token_prices 
-            WHERE UPPER(token_symbol) IN ('NOS', 'WKTO')
+            WHERE price_usd > 0
             ORDER BY UPPER(token_symbol), timestamp DESC
         "#;
-        
+
         let rows = sqlx::query(query).fetch_all(pool).await?;
-        
+
         let mut price_map = HashMap::new();
         for row in rows {
             let symbol: String = row.get("symbol");
             let price: Decimal = row.get("price_usd");
             price_map.insert(symbol, price);
         }
-        
+
         Ok(price_map)
     }
 
-    /// 检查代币是否为锚定币并返回锚定币信息
-    fn get_anchor_info(
-        token0_symbol: &Option<String>,
-        token1_symbol: &Option<String>,
+    /// 获取代币价格信息
+    fn get_token_price_info(
+        token_symbol: &Option<String>,
         price_map: &HashMap<String, Decimal>,
-    ) -> (Option<String>, Decimal, bool, bool) {
-        let anchors = ["NOS", "WKTO"];
-        
-        let token0_anchor = token0_symbol
-            .as_ref()
-            .filter(|s| anchors.contains(&s.to_uppercase().as_str()))
-            .map(|s| s.to_uppercase());
-            
-        let token1_anchor = token1_symbol
-            .as_ref()
-            .filter(|s| anchors.contains(&s.to_uppercase().as_str()))
-            .map(|s| s.to_uppercase());
-
-        let anchor = token0_anchor.clone().or(token1_anchor.clone());
-        let price = anchor
-            .as_ref()
-            .and_then(|a| price_map.get(a))
-            .cloned()
-            .unwrap_or(Decimal::ZERO);
-
-        (anchor, price, token0_anchor.is_some(), token1_anchor.is_some())
+    ) -> (Option<Decimal>, bool) {
+        if let Some(symbol) = token_symbol {
+            let upper_symbol = symbol.to_uppercase();
+            if let Some(&price) = price_map.get(&upper_symbol) {
+                return (Some(price), true);
+            }
+        }
+        (None, false)
     }
 
     /// 为TradeRecord计算USD字段
@@ -66,73 +50,79 @@ impl TradeUsdCalculator {
         pool: &PgPool,
         trades: &mut [TradeRecord],
     ) -> Result<(), sqlx::Error> {
-        let price_map = Self::get_anchor_prices(pool).await?;
-        
+        let price_map = Self::get_token_prices(pool).await?;
+
         for trade in trades.iter_mut() {
-            let (_, price, token0_is_anchor, token1_is_anchor) = 
-                Self::get_anchor_info(&trade.token0_symbol, &trade.token1_symbol, &price_map);
+            let (token0_price, token0_has_price) =
+                Self::get_token_price_info(&trade.token0_symbol, &price_map);
+            let (token1_price, token1_has_price) =
+                Self::get_token_price_info(&trade.token1_symbol, &price_map);
 
-            if price <= Decimal::ZERO {
-                trade.volume_usd = Some(Decimal::ZERO);
-                trade.price_usd = Some(Decimal::ZERO);
-                continue;
-            }
-
-            trade.volume_usd = Some(Self::calculate_volume_usd(
+            // 计算交易量USD
+            trade.volume_usd = Some(Self::calculate_trade_volume_usd(
                 &trade.amount0_in,
                 &trade.amount1_in,
                 &trade.amount0_out,
                 &trade.amount1_out,
                 &trade.trade_type,
-                price,
-                token0_is_anchor,
-                token1_is_anchor,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
             ));
 
-            trade.price_usd = Some(Self::calculate_price_usd(
+            // 计算token1的USD价格（基于交易价格）
+            trade.price_usd = Some(Self::calculate_token1_usd_price(
                 trade.price,
-                price,
-                token0_is_anchor,
-                token1_is_anchor,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
             ));
         }
-        
+
         Ok(())
     }
 
-    /// 为WalletTransaction计算USD字段
+    /// 为WalletTransaction计算USD字段 (带调试信息)
     pub async fn calculate_wallet_usd_fields(
         pool: &PgPool,
         wallet_txs: &mut [WalletTransaction],
     ) -> Result<(), sqlx::Error> {
-        let price_map = Self::get_anchor_prices(pool).await?;
-        
-        for wallet_tx in wallet_txs.iter_mut() {
-            let (_, price, token0_is_anchor, token1_is_anchor) = 
-                Self::get_anchor_info(&wallet_tx.token0_symbol, &wallet_tx.token1_symbol, &price_map);
+        let price_map = Self::get_token_prices(pool).await?;
 
-            if price <= Decimal::ZERO {
-                wallet_tx.value_usd = Some(Decimal::ZERO);
-                wallet_tx.price_usd = Some(Decimal::ZERO);
-                continue;
-            }
+        if price_map.is_empty() {
+            return Ok(());
+        }
 
-            let usd_value = match (token0_is_anchor, token1_is_anchor) {
-                (true, false) => wallet_tx.amount0 * price,
-                (false, true) => wallet_tx.amount1 * price,
-                (true, true) => wallet_tx.amount0 * price,
-                (false, false) => Decimal::ZERO,
-            };
+        for (index, wallet_tx) in wallet_txs.iter_mut().enumerate() {
+            let (token0_price, token0_has_price) =
+                Self::get_token_price_info(&wallet_tx.token0_symbol, &price_map);
+            let (token1_price, token1_has_price) =
+                Self::get_token_price_info(&wallet_tx.token1_symbol, &price_map);
+
+            // 计算交易价值USD
+            let usd_value = Self::calculate_wallet_value_usd(
+                wallet_tx.amount0,
+                wallet_tx.amount1,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
+            );
 
             wallet_tx.value_usd = Some(usd_value);
-            wallet_tx.price_usd = Some(Self::calculate_price_usd(
+
+            // 计算token1的USD价格
+            wallet_tx.price_usd = Some(Self::calculate_token1_usd_price(
                 wallet_tx.price.unwrap_or(Decimal::ZERO),
-                price,
-                token0_is_anchor,
-                token1_is_anchor,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
             ));
         }
-        
+
         Ok(())
     }
 
@@ -141,93 +131,202 @@ impl TradeUsdCalculator {
         pool: &PgPool,
         pairs: &mut [TradingPairWithStats],
     ) -> Result<(), sqlx::Error> {
-        let price_map = Self::get_anchor_prices(pool).await?;
-        
+        let price_map = Self::get_token_prices(pool).await?;
+
         for pair in pairs.iter_mut() {
-            let (_, price, token0_is_anchor, token1_is_anchor) = 
-                Self::get_anchor_info(&pair.token0_symbol, &pair.token1_symbol, &price_map);
+            let (token0_price, token0_has_price) =
+                Self::get_token_price_info(&pair.token0_symbol, &price_map);
+            let (token1_price, token1_has_price) =
+                Self::get_token_price_info(&pair.token1_symbol, &price_map);
 
-            if price <= Decimal::ZERO {
-                continue;
-            }
+            // 计算token1的USD价格
+            pair.price_usd = Self::calculate_token1_usd_price(
+                pair.price,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
+            );
 
-            match (token0_is_anchor, token1_is_anchor) {
-                (true, false) => {
-                    pair.price_usd = price;
-                    pair.volume_24h_usd = pair.volume_24h_token0 * price;
-                    pair.liquidity_usd = pair.liquidity_token0 * price * Decimal::from(2);
-                }
-                (false, true) => {
-                    pair.price_usd = if pair.price > Decimal::ZERO {
-                        price / pair.price
-                    } else {
-                        Decimal::ZERO
-                    };
-                    pair.volume_24h_usd = pair.volume_24h_token1 * price;
-                    pair.liquidity_usd = pair.liquidity_token1 * price * Decimal::from(2);
-                }
-                (true, true) => {
-                    pair.price_usd = price;
-                    pair.volume_24h_usd = pair.volume_24h_token0 * price;
-                    pair.liquidity_usd = pair.liquidity_token0 * price * Decimal::from(2);
-                }
-                (false, false) => {}
-            }
+            // 计算24小时交易量USD
+            pair.volume_24h_usd = Self::calculate_pair_volume_usd(
+                pair.volume_24h_token0,
+                pair.volume_24h_token1,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
+            );
+
+            // 计算流动性USD
+            pair.liquidity_usd = Self::calculate_pair_liquidity_usd(
+                pair.liquidity_token0,
+                pair.liquidity_token1,
+                token0_price,
+                token1_price,
+                token0_has_price,
+                token1_has_price,
+            );
         }
-        
+
         Ok(())
     }
 
+    /// 计算token1的USD价格（修正版本）
+    /// price 参数表示：1 token1 = price * token0 (即 token1/token0 的比率)
+    fn calculate_token1_usd_price(
+        price: Decimal,
+        token0_price: Option<Decimal>,
+        token1_price: Option<Decimal>,
+        token0_has_price: bool,
+        token1_has_price: bool,
+    ) -> Decimal {
+        match (token0_has_price, token1_has_price) {
+            (true, false) => {
+                // 只有token0有USD价格，通过交易价格计算token1的USD价格
+                // 如果 1 token1 = price * token0，那么 token1_usd = price * token0_usd
+                if price > Decimal::ZERO {
+                    let token1_usd_price = price * token0_price.unwrap_or(Decimal::ZERO);
+
+                    token1_usd_price
+                } else {
+                    Decimal::ZERO
+                }
+            }
+            (false, true) => {
+                // 只有token1有USD价格，直接使用
+                let token1_usd_price = token1_price.unwrap_or(Decimal::ZERO);
+                token1_usd_price
+            }
+            (true, true) => {
+                // 两个代币都有USD价格，优先使用token1的直接价格
+                // 但也可以通过token0价格验证一致性
+                let direct_price = token1_price.unwrap_or(Decimal::ZERO);
+                let calculated_price = if price > Decimal::ZERO {
+                    price * token0_price.unwrap_or(Decimal::ZERO)
+                } else {
+                    Decimal::ZERO
+                };
+
+                // 使用直接价格，但可以添加一致性检查
+                if direct_price > Decimal::ZERO {
+                    direct_price
+                } else {
+                    calculated_price
+                }
+            }
+            (false, false) => {
+                // 都没有USD价格，无法计算
+                Decimal::ZERO
+            }
+        }
+    }
+
+    /// 计算钱包交易价值USD
+    fn calculate_wallet_value_usd(
+        amount0: Decimal,
+        amount1: Decimal,
+        token0_price: Option<Decimal>,
+        token1_price: Option<Decimal>,
+        token0_has_price: bool,
+        token1_has_price: bool,
+    ) -> Decimal {
+        let mut total_usd = Decimal::ZERO;
+
+        if token0_has_price && amount0 > Decimal::ZERO {
+            let token0_usd = amount0 * token0_price.unwrap_or(Decimal::ZERO);
+            total_usd += token0_usd;
+        }
+
+        if token1_has_price && amount1 > Decimal::ZERO {
+            let token1_usd = amount1 * token1_price.unwrap_or(Decimal::ZERO);
+            total_usd += token1_usd;
+        }
+
+        total_usd
+    }
+
     /// 计算交易量USD
-    fn calculate_volume_usd(
+    fn calculate_trade_volume_usd(
         amount0_in: &Decimal,
         amount1_in: &Decimal,
         amount0_out: &Decimal,
         amount1_out: &Decimal,
         trade_type: &str,
-        anchor_price: Decimal,
-        token0_is_anchor: bool,
-        token1_is_anchor: bool,
+        token0_price: Option<Decimal>,
+        token1_price: Option<Decimal>,
+        token0_has_price: bool,
+        token1_has_price: bool,
     ) -> Decimal {
-        match (token0_is_anchor, token1_is_anchor) {
-            (true, false) => match trade_type {
-                "buy" => amount0_in * anchor_price,
-                "sell" => amount0_out * anchor_price,
-                _ => Decimal::ZERO,
-            },
-            (false, true) => match trade_type {
-                "buy" => amount1_out * anchor_price,
-                "sell" => amount1_in * anchor_price,
-                _ => Decimal::ZERO,
-            },
-            (true, true) => match trade_type {
-                "buy" => amount0_in * anchor_price,
-                "sell" => amount0_out * anchor_price,
-                _ => Decimal::ZERO,
-            },
-            (false, false) => Decimal::ZERO,
-        }
-    }
-
-    /// 计算价格USD
-    fn calculate_price_usd(
-        price: Decimal,
-        anchor_price: Decimal,
-        token0_is_anchor: bool,
-        token1_is_anchor: bool,
-    ) -> Decimal {
-        match (token0_is_anchor, token1_is_anchor) {
-            (true, false) => anchor_price,
-            (false, true) => {
-                if price > Decimal::ZERO {
-                    anchor_price / price
+        match trade_type {
+            "buy" => {
+                if token0_has_price {
+                    amount0_in * token0_price.unwrap_or(Decimal::ZERO)
+                } else if token1_has_price {
+                    amount1_out * token1_price.unwrap_or(Decimal::ZERO)
                 } else {
                     Decimal::ZERO
                 }
             }
-            (true, true) => anchor_price,
-            (false, false) => Decimal::ZERO,
+            "sell" => {
+                if token0_has_price {
+                    amount0_out * token0_price.unwrap_or(Decimal::ZERO)
+                } else if token1_has_price {
+                    amount1_in * token1_price.unwrap_or(Decimal::ZERO)
+                } else {
+                    Decimal::ZERO
+                }
+            }
+            _ => {
+                if token0_has_price {
+                    (amount0_in + amount0_out) * token0_price.unwrap_or(Decimal::ZERO)
+                } else if token1_has_price {
+                    (amount1_in + amount1_out) * token1_price.unwrap_or(Decimal::ZERO)
+                } else {
+                    Decimal::ZERO
+                }
+            }
         }
+    }
+
+    /// 计算交易对24小时交易量USD
+    fn calculate_pair_volume_usd(
+        volume_token0: Decimal,
+        volume_token1: Decimal,
+        token0_price: Option<Decimal>,
+        token1_price: Option<Decimal>,
+        token0_has_price: bool,
+        token1_has_price: bool,
+    ) -> Decimal {
+        if token0_has_price {
+            volume_token0 * token0_price.unwrap_or(Decimal::ZERO)
+        } else if token1_has_price {
+            volume_token1 * token1_price.unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        }
+    }
+
+    /// 计算交易对流动性USD
+    fn calculate_pair_liquidity_usd(
+        liquidity_token0: Decimal,
+        liquidity_token1: Decimal,
+        token0_price: Option<Decimal>,
+        token1_price: Option<Decimal>,
+        token0_has_price: bool,
+        token1_has_price: bool,
+    ) -> Decimal {
+        let mut total_liquidity_usd = Decimal::ZERO;
+
+        if token0_has_price {
+            total_liquidity_usd += liquidity_token0 * token0_price.unwrap_or(Decimal::ZERO);
+        }
+
+        if token1_has_price {
+            total_liquidity_usd += liquidity_token1 * token1_price.unwrap_or(Decimal::ZERO);
+        }
+
+        total_liquidity_usd
     }
 
     /// 筛选有USD数据的记录
@@ -251,7 +350,11 @@ pub struct UsdStats {
 }
 
 impl UsdStats {
-    pub fn calculate<T>(items: &[T], get_usd_fn: fn(&T) -> Decimal, has_usd_fn: fn(&T) -> bool) -> Self {
+    pub fn calculate<T>(
+        items: &[T],
+        get_usd_fn: fn(&T) -> Decimal,
+        has_usd_fn: fn(&T) -> bool,
+    ) -> Self {
         let items_with_usd: Vec<_> = items.iter().filter(|item| has_usd_fn(item)).collect();
         let total_value_usd: Decimal = items_with_usd.iter().map(|item| get_usd_fn(item)).sum();
         let avg_value_usd = if !items_with_usd.is_empty() {

@@ -186,7 +186,7 @@ impl WalletOperations {
             transactions.push(trade);
         }
         // 计算USD字段
-        super::TradeUsdCalculator::calculate_wallet_usd_fields(pool, &mut transactions);
+        super::TradeUsdCalculator::calculate_wallet_usd_fields(pool, &mut transactions).await?;
 
         Ok((transactions, total))
     }

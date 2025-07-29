@@ -348,7 +348,7 @@ impl TradingOperations {
             pairs.push(pair);
         }
         // 后处理：计算USD相关字段
-        super::TradeUsdCalculator::calculate_pair_usd_fields(pool, &mut pairs);
+        super::TradeUsdCalculator::calculate_pair_usd_fields(pool, &mut pairs).await?;
 
         // 按USD成交量重新排序（如果有USD数据的话）
         pairs.sort_by(|a, b| {
@@ -562,7 +562,7 @@ impl TradingOperations {
             super::TradeUsdCalculator::calculate_pair_usd_fields(
                 pool,
                 std::slice::from_mut(&mut pair),
-            );
+            ).await?;
 
             Ok(Some(pair))
         } else {
@@ -710,7 +710,7 @@ impl TradingOperations {
             trades.push(trade);
         }
         // 计算USD字段
-        super::TradeUsdCalculator::calculate_trade_usd_fields(pool, &mut trades);
+        super::TradeUsdCalculator::calculate_trade_usd_fields(pool, &mut trades).await?;
         Ok((trades, total))
     }
     // 获取交易对统计信息
