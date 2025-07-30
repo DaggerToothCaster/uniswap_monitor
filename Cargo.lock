@@ -5149,6 +5149,7 @@ dependencies = [
  "ethers",
  "futures-util",
  "hex",
+ "num-traits",
  "openssl",
  "reqwest 0.12.22",
  "rust_decimal",

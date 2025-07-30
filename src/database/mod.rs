@@ -4,9 +4,7 @@ use anyhow::Result;
 use sqlx::PgPool;
 // Re-export operations and utils
 pub use operations::*;
-pub use utils::*;
 use tracing::debug;
-
 
 #[derive(Clone)]
 pub struct Database {

@@ -7,6 +7,143 @@ use std::collections::HashMap;
 /// 统一的USD计算辅助结构
 pub struct TradeUsdCalculator;
 
+/// 代币重排序和定价工具
+pub struct TokenReorderingTool;
+
+impl TokenReorderingTool {
+    /// 定义计价代币优先级 (KTO, USDT, NOS)
+    const QUOTE_TOKENS: &'static [&'static str] = &["KTO", "USDT", "NOS"];
+
+    /// 检查是否为计价代币
+    pub fn is_quote_token(symbol: &Option<String>) -> bool {
+        if let Some(symbol) = symbol {
+            let upper_symbol = symbol.to_uppercase();
+            Self::QUOTE_TOKENS.contains(&upper_symbol.as_str())
+        } else {
+            false
+        }
+    }
+
+    /// 获取计价代币优先级 (数字越小优先级越高)
+    pub fn get_quote_priority(symbol: &Option<String>) -> usize {
+        if let Some(symbol) = symbol {
+            let upper_symbol = symbol.to_uppercase();
+            Self::QUOTE_TOKENS
+                .iter()
+                .position(|&token| token == upper_symbol)
+                .unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// 重新排序交易对，确保计价代币作为token1
+    pub fn reorder_trading_pair_with_stats(pair: &mut TradingPairWithStats) {
+        let token0_is_quote = Self::is_quote_token(&pair.token0_symbol);
+        let token1_is_quote = Self::is_quote_token(&pair.token1_symbol);
+
+        // 如果token0是计价代币而token1不是，或者两个都是计价代币但token0优先级更高，则交换
+        let should_swap = if token0_is_quote && !token1_is_quote {
+            true
+        } else if token0_is_quote && token1_is_quote {
+            Self::get_quote_priority(&pair.token0_symbol)
+                < Self::get_quote_priority(&pair.token1_symbol)
+        } else {
+            false
+        };
+
+        if should_swap {
+            // 交换基本信息
+            std::mem::swap(&mut pair.token0, &mut pair.token1);
+            std::mem::swap(&mut pair.token0_symbol, &mut pair.token1_symbol);
+            std::mem::swap(&mut pair.token0_decimals, &mut pair.token1_decimals);
+
+            // 交换数量相关数据
+            std::mem::swap(&mut pair.volume_24h_token0, &mut pair.volume_24h_token1);
+            std::mem::swap(&mut pair.liquidity_token0, &mut pair.liquidity_token1);
+
+            // 调整价格 (原价格的倒数)
+            if pair.price > Decimal::ZERO {
+                pair.price = Decimal::ONE / pair.price;
+            }
+            if pair.inverted_price > Decimal::ZERO {
+                pair.inverted_price = Decimal::ONE / pair.inverted_price;
+            }
+        }
+    }
+
+    /// 重新排序交易记录
+    pub fn reorder_trade_record(trade: &mut TradeRecord) {
+        let token0_is_quote = Self::is_quote_token(&trade.token0_symbol);
+        let token1_is_quote = Self::is_quote_token(&trade.token1_symbol);
+
+        let should_swap = if token0_is_quote && !token1_is_quote {
+            true
+        } else if token0_is_quote && token1_is_quote {
+            Self::get_quote_priority(&trade.token0_symbol)
+                < Self::get_quote_priority(&trade.token1_symbol)
+        } else {
+            false
+        };
+
+        if should_swap {
+            // 交换代币信息
+            std::mem::swap(&mut trade.token0_symbol, &mut trade.token1_symbol);
+            std::mem::swap(&mut trade.token0_decimals, &mut trade.token1_decimals);
+
+            // 交换金额
+            std::mem::swap(&mut trade.amount0_in, &mut trade.amount1_in);
+            std::mem::swap(&mut trade.amount0_out, &mut trade.amount1_out);
+
+            // 调整价格
+            if trade.price > Decimal::ZERO {
+                trade.price = Decimal::ONE / trade.price;
+            }
+
+            // 调整交易类型
+            trade.trade_type = match trade.trade_type.as_str() {
+                "buy" => "sell".to_string(),
+                "sell" => "buy".to_string(),
+                other => other.to_string(),
+            };
+        }
+    }
+
+    /// 重新排序钱包交易
+    pub fn reorder_wallet_transaction(wallet_tx: &mut WalletTransaction) {
+        let token0_is_quote = Self::is_quote_token(&wallet_tx.token0_symbol);
+        let token1_is_quote = Self::is_quote_token(&wallet_tx.token1_symbol);
+
+        let should_swap = if token0_is_quote && !token1_is_quote {
+            true
+        } else if token0_is_quote && token1_is_quote {
+            Self::get_quote_priority(&wallet_tx.token0_symbol)
+                < Self::get_quote_priority(&wallet_tx.token1_symbol)
+        } else {
+            false
+        };
+
+        if should_swap {
+            // 交换代币信息
+            std::mem::swap(&mut wallet_tx.token0_symbol, &mut wallet_tx.token1_symbol);
+            std::mem::swap(
+                &mut wallet_tx.token0_decimals,
+                &mut wallet_tx.token1_decimals,
+            );
+
+            // 交换金额
+            std::mem::swap(&mut wallet_tx.amount0, &mut wallet_tx.amount1);
+
+            // 调整价格
+            if let Some(price) = wallet_tx.price {
+                if price > Decimal::ZERO {
+                    wallet_tx.price = Some(Decimal::ONE / price);
+                }
+            }
+        }
+    }
+}
+
 impl TradeUsdCalculator {
     /// 获取所有代币的最新USD价格
     pub async fn get_token_prices(pool: &PgPool) -> Result<HashMap<String, Decimal>, sqlx::Error> {
@@ -45,7 +182,7 @@ impl TradeUsdCalculator {
         (None, false)
     }
 
-    /// 为TradeRecord计算USD字段
+    /// 为TradeRecord计算USD字段 (带重排序)
     pub async fn calculate_trade_usd_fields(
         pool: &PgPool,
         trades: &mut [TradeRecord],
@@ -53,6 +190,9 @@ impl TradeUsdCalculator {
         let price_map = Self::get_token_prices(pool).await?;
 
         for trade in trades.iter_mut() {
+            // 首先进行代币重排序
+            TokenReorderingTool::reorder_trade_record(trade);
+
             let (token0_price, token0_has_price) =
                 Self::get_token_price_info(&trade.token0_symbol, &price_map);
             let (token1_price, token1_has_price) =
@@ -78,13 +218,14 @@ impl TradeUsdCalculator {
                 token1_price,
                 token0_has_price,
                 token1_has_price,
+                &trade.token1_symbol,
             ));
         }
 
         Ok(())
     }
 
-    /// 为WalletTransaction计算USD字段 (带调试信息)
+    /// 为WalletTransaction计算USD字段 (带重排序)
     pub async fn calculate_wallet_usd_fields(
         pool: &PgPool,
         wallet_txs: &mut [WalletTransaction],
@@ -95,7 +236,10 @@ impl TradeUsdCalculator {
             return Ok(());
         }
 
-        for (index, wallet_tx) in wallet_txs.iter_mut().enumerate() {
+        for wallet_tx in wallet_txs.iter_mut() {
+            // 首先进行代币重排序
+            TokenReorderingTool::reorder_wallet_transaction(wallet_tx);
+
             let (token0_price, token0_has_price) =
                 Self::get_token_price_info(&wallet_tx.token0_symbol, &price_map);
             let (token1_price, token1_has_price) =
@@ -120,13 +264,14 @@ impl TradeUsdCalculator {
                 token1_price,
                 token0_has_price,
                 token1_has_price,
+                &wallet_tx.token1_symbol,
             ));
         }
 
         Ok(())
     }
 
-    /// 为TradingPairWithStats计算USD字段
+    /// 为TradingPairWithStats计算USD字段 (带重排序)
     pub async fn calculate_pair_usd_fields(
         pool: &PgPool,
         pairs: &mut [TradingPairWithStats],
@@ -134,6 +279,9 @@ impl TradeUsdCalculator {
         let price_map = Self::get_token_prices(pool).await?;
 
         for pair in pairs.iter_mut() {
+            // 首先进行代币重排序
+            TokenReorderingTool::reorder_trading_pair_with_stats(pair);
+
             let (token0_price, token0_has_price) =
                 Self::get_token_price_info(&pair.token0_symbol, &price_map);
             let (token1_price, token1_has_price) =
@@ -146,6 +294,7 @@ impl TradeUsdCalculator {
                 token1_price,
                 token0_has_price,
                 token1_has_price,
+                &pair.token1_symbol,
             );
 
             // 计算24小时交易量USD
@@ -172,35 +321,40 @@ impl TradeUsdCalculator {
         Ok(())
     }
 
-    /// 计算token1的USD价格（修正版本）
-    /// price 参数表示：1 token1 = price * token0 (即 token1/token0 的比率)
+    /// 计算token1的USD价格（修正版本，支持计价代币直接转换）
     fn calculate_token1_usd_price(
         price: Decimal,
         token0_price: Option<Decimal>,
         token1_price: Option<Decimal>,
         token0_has_price: bool,
         token1_has_price: bool,
+        token1_symbol: &Option<String>,
     ) -> Decimal {
+        // 如果token1是计价代币(KTO/USDT/NOS)且有价格，直接返回其USDT价格
+        if token1_has_price {
+            if let Some(symbol) = token1_symbol {
+                let upper_symbol = symbol.to_uppercase();
+                if TokenReorderingTool::QUOTE_TOKENS.contains(&upper_symbol.as_str()) {
+                    return token1_price.unwrap_or(Decimal::ZERO);
+                }
+            }
+        }
+
         match (token0_has_price, token1_has_price) {
             (true, false) => {
                 // 只有token0有USD价格，通过交易价格计算token1的USD价格
-                // 如果 1 token1 = price * token0，那么 token1_usd = price * token0_usd
                 if price > Decimal::ZERO {
-                    let token1_usd_price = price * token0_price.unwrap_or(Decimal::ZERO);
-
-                    token1_usd_price
+                    price * token0_price.unwrap_or(Decimal::ZERO)
                 } else {
                     Decimal::ZERO
                 }
             }
             (false, true) => {
                 // 只有token1有USD价格，直接使用
-                let token1_usd_price = token1_price.unwrap_or(Decimal::ZERO);
-                token1_usd_price
+                token1_price.unwrap_or(Decimal::ZERO)
             }
             (true, true) => {
                 // 两个代币都有USD价格，优先使用token1的直接价格
-                // 但也可以通过token0价格验证一致性
                 let direct_price = token1_price.unwrap_or(Decimal::ZERO);
                 let calculated_price = if price > Decimal::ZERO {
                     price * token0_price.unwrap_or(Decimal::ZERO)
@@ -208,7 +362,6 @@ impl TradeUsdCalculator {
                     Decimal::ZERO
                 };
 
-                // 使用直接价格，但可以添加一致性检查
                 if direct_price > Decimal::ZERO {
                     direct_price
                 } else {
