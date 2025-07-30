@@ -171,7 +171,6 @@ impl TradingOperations {
     ) -> Result<(Vec<TradingPairWithStats>, i64), sqlx::Error> {
         let has_chain_filter = chain_id.unwrap_or(0) != 0;
 
-        // 保持原有的SQL查询不变
         let base_query = format!(
             r#"
         WITH latest_swap AS (
@@ -215,11 +214,11 @@ impl TradingOperations {
                 ls.latest_timestamp AS last_updated,
                 COALESCE(pd.current_price, 0)::NUMERIC(38,18) AS price,
                 COALESCE(1 / NULLIF(pd.current_price, 0), 0)::NUMERIC(38,18) AS inverted_price,
-                COALESCE(
-                    ((pd.current_price - pd.price_24h_ago) / NULLIF(pd.price_24h_ago, 0)) * 100,
-                    0
-                )::NUMERIC(38,18) AS price_24h_change,
-                -- 24h volumes
+                CASE 
+                    WHEN pd.current_price IS NOT NULL AND pd.price_24h_ago IS NOT NULL AND pd.price_24h_ago != 0 THEN
+                        ((pd.current_price - pd.price_24h_ago) / pd.price_24h_ago) * 100
+                    ELSE NULL
+                END::NUMERIC(38,18) AS price_24h_change,
                 (
                     SELECT COALESCE(SUM(
                         ((se.amount0_in + se.amount0_out)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC)
@@ -236,13 +235,11 @@ impl TradingOperations {
                     WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
                     AND se.timestamp >= NOW() - INTERVAL '24 hours'
                 ) AS volume_24h_token1,
-                -- 24h tx count
                 (
                     SELECT COUNT(*) FROM swap_events se 
                     WHERE se.pair_address = tp.address AND se.chain_id = tp.chain_id 
                     AND se.timestamp >= NOW() - INTERVAL '24 hours'
                 ) AS tx_count_24h,
-                -- token0 liquidity
                 (
                     SELECT COALESCE(SUM(
                         (me.amount0)::NUMERIC / POWER(10, COALESCE(tp.token0_decimals, 18))::NUMERIC
@@ -257,7 +254,6 @@ impl TradingOperations {
                     FROM burn_events be 
                     WHERE be.pair_address = tp.address AND be.chain_id = tp.chain_id
                 ) AS liquidity_token0,
-                -- token1 liquidity
                 (
                     SELECT COALESCE(SUM(
                         (me.amount1)::NUMERIC / POWER(10, COALESCE(tp.token1_decimals, 18))::NUMERIC
@@ -300,7 +296,6 @@ impl TradingOperations {
             if has_chain_filter { 3 } else { 2 }
         );
 
-        // 执行原有查询
         let rows = if has_chain_filter {
             sqlx::query(&base_query)
                 .bind(chain_id.unwrap())
@@ -316,7 +311,6 @@ impl TradingOperations {
                 .await?
         };
 
-        // 处理查询结果并计算USD字段
         let mut pairs = Vec::new();
         for row in rows {
             let mut pair = TradingPairWithStats {
@@ -333,13 +327,13 @@ impl TradingOperations {
                 last_updated: safe_get_optional_datetime(&row, "last_updated"),
                 price: safe_get_decimal(&row, "price"),
                 inverted_price: safe_get_decimal(&row, "inverted_price"),
-                price_24h_change: safe_get_decimal(&row, "price_24h_change"),
+                price_24h_change: safe_get_optional_decimal(&row, "price_24h_change")
+                    .unwrap_or(Decimal::ZERO),
                 volume_24h_token0: safe_get_decimal(&row, "volume_24h_token0"),
                 volume_24h_token1: safe_get_decimal(&row, "volume_24h_token1"),
                 tx_count_24h: safe_get_i64(&row, "tx_count_24h"),
                 liquidity_token0: safe_get_decimal(&row, "liquidity_token0"),
                 liquidity_token1: safe_get_decimal(&row, "liquidity_token1"),
-                // 初始化USD字段为0，后续计算
                 price_usd: Decimal::ZERO,
                 volume_24h_usd: Decimal::ZERO,
                 liquidity_usd: Decimal::ZERO,
@@ -347,10 +341,9 @@ impl TradingOperations {
 
             pairs.push(pair);
         }
-        // 后处理：计算USD相关字段
+
         super::TradeUsdCalculator::calculate_pair_usd_fields(pool, &mut pairs).await?;
 
-        // 按USD成交量重新排序（如果有USD数据的话）
         pairs.sort_by(|a, b| {
             if a.volume_24h_usd > Decimal::ZERO || b.volume_24h_usd > Decimal::ZERO {
                 b.volume_24h_usd.cmp(&a.volume_24h_usd)
@@ -359,7 +352,6 @@ impl TradingOperations {
             }
         });
 
-        // 获取总数
         let count_query = if has_chain_filter {
             "SELECT COUNT(*) FROM trading_pairs WHERE chain_id = $1"
         } else {
@@ -562,7 +554,8 @@ impl TradingOperations {
             super::TradeUsdCalculator::calculate_pair_usd_fields(
                 pool,
                 std::slice::from_mut(&mut pair),
-            ).await?;
+            )
+            .await?;
 
             Ok(Some(pair))
         } else {
