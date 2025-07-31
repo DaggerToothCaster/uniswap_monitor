@@ -126,27 +126,27 @@ impl TradingOperations {
     /// 插入交易对（由事件服务触发）
     pub async fn insert_trading_pair(pool: &PgPool, pair: &TradingPair) -> Result<()> {
         sqlx::query(
-        r#"
-        INSERT INTO trading_pairs 
-        (chain_id, address, token0, token1, token0_symbol, token1_symbol, token0_decimals, token1_decimals, token0_name, token1_name, block_number, transaction_hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        ON CONFLICT (chain_id, address) DO NOTHING
-        "#,
-    )
-    .bind(pair.chain_id)
-    .bind(&pair.address)
-    .bind(&pair.token0)
-    .bind(&pair.token1)
-    .bind(&pair.token0_symbol)
-    .bind(&pair.token1_symbol)
-    .bind(&pair.token0_decimals)
-    .bind(&pair.token1_decimals)
-    .bind(&pair.token0_name)
-    .bind(&pair.token1_name)
-    .bind(pair.block_number)
-    .bind(&pair.transaction_hash)
-    .execute(pool)
-    .await?;
+            r#"
+            INSERT INTO trading_pairs 
+            (chain_id, address, token0, token1, token0_symbol, token1_symbol, token0_decimals, token1_decimals, token0_name, token1_name, block_number, transaction_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (chain_id, address) DO NOTHING
+            "#,
+        )
+        .bind(pair.chain_id)
+        .bind(&pair.address)
+        .bind(&pair.token0)
+        .bind(&pair.token1)
+        .bind(&pair.token0_symbol)
+        .bind(&pair.token1_symbol)
+        .bind(&pair.token0_decimals)
+        .bind(&pair.token1_decimals)
+        .bind(&pair.token0_name)
+        .bind(&pair.token1_name)
+        .bind(pair.block_number)
+        .bind(&pair.transaction_hash)
+        .execute(pool)
+        .await?;
 
         Ok(())
     }
