@@ -954,7 +954,7 @@ impl TradingOperations {
         Ok((liquidity_records, total))
     }
 
-    // 修复精度处理的K线数据查询函数
+    /// 获取K线数据（价格已转换为USD）
     pub async fn get_kline_data(
         pool: &PgPool,
         pair_address: &str,
@@ -1101,10 +1101,37 @@ impl TradingOperations {
             });
         }
 
+        // 获取交易对信息以确定哪个代币是NOS
+        let pair_info_query = r#"
+        SELECT token0_symbol, token1_symbol
+        FROM trading_pairs 
+        WHERE address = $1 AND chain_id = $2
+    "#;
+
+        let pair_row = sqlx::query(pair_info_query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .fetch_optional(pool)
+            .await?;
+
+        if let Some(pair_row) = pair_row {
+            let token0_symbol: Option<String> = pair_row.try_get("token0_symbol").ok();
+            let token1_symbol: Option<String> = pair_row.try_get("token1_symbol").ok();
+
+            // 转换K线价格为USD
+            super::TradeUsdCalculator::calculate_kline_usd_fields(
+                pool,
+                &mut klines,
+                &token0_symbol,
+                &token1_symbol,
+            )
+            .await?;
+        }
+
         Ok((klines, total))
     }
 
-    // 修复精度处理的时间序列数据查询
+    /// 获取时间序列数据（价格已转换为USD）
     pub async fn get_timeseries_data(
         pool: &PgPool,
         pair_address: &str,
@@ -1197,8 +1224,33 @@ impl TradingOperations {
             });
         }
 
+        // 获取交易对信息以确定哪个代币是NOS
+        let pair_info_query = r#"
+        SELECT token0_symbol, token1_symbol
+        FROM trading_pairs 
+        WHERE address = $1 AND chain_id = $2
+    "#;
+
+        let pair_row = sqlx::query(pair_info_query)
+            .bind(pair_address)
+            .bind(chain_id)
+            .fetch_optional(pool)
+            .await?;
+
+        if let Some(pair_row) = pair_row {
+            let token0_symbol: Option<String> = pair_row.try_get("token0_symbol").ok();
+            let token1_symbol: Option<String> = pair_row.try_get("token1_symbol").ok();
+
+            // 转换时间序列价格为USD
+            super::TradeUsdCalculator::calculate_timeseries_usd_fields(
+                pool,
+                &mut timeseries,
+                &token0_symbol,
+                &token1_symbol,
+            )
+            .await?;
+        }
+
         Ok((timeseries, total))
     }
-
-    // 辅助函数：计算USD相关字段
 }
